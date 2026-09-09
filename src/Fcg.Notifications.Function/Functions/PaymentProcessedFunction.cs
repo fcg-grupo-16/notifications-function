@@ -1,4 +1,5 @@
 using Fcg.Contracts.Events;
+using Fcg.Notifications.Function.Email;
 using Fcg.Notifications.Function.Messaging;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
@@ -13,16 +14,18 @@ public sealed class PaymentProcessedFunction
 {
     private const string TipoEsperado = "Fcg.Contracts.Events:PaymentProcessedEvent";
 
-    /// <summary>Status que representa pagamento aprovado, conforme o contrato do evento.</summary>
-    private const string StatusAprovado = "Approved";
-
     private readonly ILogger<PaymentProcessedFunction> _logger;
+    private readonly IEmailSender _emailSender;
 
-    public PaymentProcessedFunction(ILogger<PaymentProcessedFunction> logger) => _logger = logger;
+    public PaymentProcessedFunction(ILogger<PaymentProcessedFunction> logger, IEmailSender emailSender)
+    {
+        _logger = logger;
+        _emailSender = emailSender;
+    }
 
     /// <inheritdoc cref="UserCreatedFunction.RunAsync"/>
     [Function(nameof(PaymentProcessedFunction))]
-    public Task RunAsync(
+    public async Task RunAsync(
         [RabbitMQTrigger("notifications-payment-processed", ConnectionStringSetting = "RabbitMqConnection")]
         string mensagem,
         CancellationToken cancellationToken)
@@ -34,7 +37,7 @@ public sealed class PaymentProcessedFunction
             _logger.LogWarning(
                 "Mensagem inválida ou de tipo inesperado na fila notifications-payment-processed; descartada.");
             _logger.LogDebug("Corpo descartado: {Corpo}", LogSanitizer.TruncarCorpo(mensagem));
-            return Task.CompletedTask;
+            return;
         }
 
         var evento = envelope.Message!;
@@ -45,29 +48,32 @@ public sealed class PaymentProcessedFunction
             _logger.LogWarning(
                 "PaymentProcessedEvent sem campo obrigatório (OrderId ou UserId); descartado. ConversationId={ConversationId}",
                 envelope.ConversationId);
-            return Task.CompletedTask;
+            return;
         }
 
-        // Regra de negócio portada do PaymentProcessedConsumer: só pagamento APROVADO gera e-mail.
-        // Na issue #2 esta verificação passa a ser feita por EmailTemplates.PurchaseConfirmation,
-        // que devolve null quando o status não é "Approved" — a regra fica num lugar só.
-        if (!string.Equals(evento.Status, StatusAprovado, StringComparison.OrdinalIgnoreCase))
+        // A REGRA DE NEGÓCIO MORA NO TEMPLATE, não aqui: PurchaseConfirmation devolve null quando
+        // o pagamento não foi aprovado. Duplicar a verificação com um `if (Status != "Approved")`
+        // nesta função criaria dois lugares para a mesma regra, que um dia divergiriam.
+        // Comportamento portado 1:1 do PaymentProcessedConsumer.
+        var confirmacao = EmailTemplates.PurchaseConfirmation(evento);
+
+        if (confirmacao is null)
         {
             _logger.LogInformation(
                 "Pagamento {Status} para o pedido {OrderId} (usuário {UserId}): nenhum e-mail de confirmação será enviado.",
                 evento.Status, evento.OrderId, evento.UserId);
-            return Task.CompletedTask;
+            return;
         }
 
         _logger.LogInformation(
             "PaymentProcessedEvent aprovado. OrderId={OrderId} UserId={UserId} GameId={GameId} ConversationId={ConversationId}",
             evento.OrderId, evento.UserId, evento.GameId, envelope.ConversationId);
 
-        // TODO(#3): idempotência por OrderId em Redis — ATENÇÃO: a chave só pode ser consumida no
-        //           caminho aprovado, senão um evento "Rejected" bloquearia a confirmação legítima
-        //           de um reprocessamento posterior.
-        // TODO(#2): enviar a confirmação via IEmailSender.
+        // TODO(#3): idempotência por OrderId AQUI — e a chave só pode ser consumida neste caminho
+        //           aprovado: um evento "Rejected" que gastasse a chave bloquearia a confirmação
+        //           legítima de um reprocessamento posterior.
+        await _emailSender.SendAsync(confirmacao, cancellationToken);
+
         // TODO(#4): persistir o histórico.
-        return Task.CompletedTask;
     }
 }

@@ -13,6 +13,31 @@ public static class LogSanitizer
     private const int TamanhoMaximoCorpo = 500;
 
     /// <summary>
+    /// Indica se o valor é um destinatário de e-mail aceitável para prosseguir.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Não é validação de RFC 5322 — é uma barreira contra os dois abusos concretos que o endereço
+    /// permite hoje, vindo de um campo que qualquer publisher controla:
+    /// </para>
+    /// <list type="number">
+    ///   <item>
+    ///     <b>CR/LF.</b> <c>IsNullOrWhiteSpace</c> não barra quebra de linha INTERNA. Um
+    ///     <c>vitima@fcg.com\r\nBcc: atacante@evil.com</c> passa hoje como injeção de LOG (forja
+    ///     linhas inteiras no stdout) e, no dia em que plugarem um SMTP de verdade, vira injeção de
+    ///     CABEÇALHO — exatamente o cenário que o contrato de <c>IEmailSender</c> antecipa.
+    ///   </item>
+    ///   <item>
+    ///     <b>Tamanho.</b> Endereço absurdamente longo só serve para inflar log e payload.
+    ///   </item>
+    /// </list>
+    /// </remarks>
+    public static bool DestinatarioEhAceitavel(string? destinatario) =>
+        !string.IsNullOrWhiteSpace(destinatario)
+        && destinatario.Length <= 320                      // limite prático de endereço de e-mail
+        && destinatario.AsSpan().IndexOfAny('\r', '\n') < 0;
+
+    /// <summary>
     /// Mascara um e-mail preservando o suficiente para investigar (<c>ma***@fcg.com</c>).
     /// </summary>
     /// <remarks>

@@ -1,4 +1,6 @@
+using Fcg.Notifications.Function.Email;
 using Microsoft.Azure.Functions.Worker.Builder;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 
 var builder = FunctionsApplication.CreateBuilder(args);
@@ -8,7 +10,10 @@ var builder = FunctionsApplication.CreateBuilder(args);
 // pacote seria peso morto. A issue #4, se optar por expor o histórico via HttpTrigger, adiciona
 // o pacote e a chamada junto.
 
-// TODO(#2): builder.Services.AddSingleton<IEmailSender, LoggingEmailSender>();
+// Envio de e-mail PLUGÁVEL: hoje um sender que apenas registra no log (simulação, sem provedor
+// externo), trocável por SMTP/HTTP real via DI sem tocar nas Functions, que dependem só da
+// interface. Comportamento idêntico ao do notifications-api.
+builder.Services.AddSingleton<IEmailSender, LoggingEmailSender>();
 // TODO(#3): Redis (IConnectionMultiplexer + IProcessedMessageStore) — obrigatório, sem fallback
 //           em memória: a Function escala a zero e perderia a garantia de idempotência.
 // TODO(#4): MongoDB (notificationsdb) para o histórico de notificações.
