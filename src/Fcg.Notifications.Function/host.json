@@ -1,0 +1,16 @@
+{
+  "version": "2.0",
+  "logging": {
+    "logLevel": {
+      "default": "Information",
+      "Fcg.Notifications.Function": "Information",
+      "Host.Results": "Information",
+      "Host.Aggregator": "Warning"
+    }
+  },
+  "extensions": {
+    "rabbitMQ": {
+      "prefetchCount": 20
+    }
+  }
+}

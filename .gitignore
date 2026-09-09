@@ -427,3 +427,6 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Contém connection strings — NUNCA versionar.
+local.settings.json

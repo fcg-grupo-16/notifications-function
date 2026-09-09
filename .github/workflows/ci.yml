@@ -1,0 +1,53 @@
+name: CI
+
+# Build + testes da função serverless de notificações.
+# Espelha o CI dos demais repositórios do grupo: concurrency, least privilege e versões pinadas.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build e testes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          # net8.0 e não net10.0: o suporte a .NET 10 no host de Azure Functions ainda é preview.
+          # Decisão documentada no README.
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore --configuration Release
+
+      - name: Testes
+        run: dotnet test --no-build --configuration Release --verbosity normal
+
+      # Gate de segurança. Dois detalhes que já fizeram este gate ser um no-op noutro momento:
+      #  1. o relatório do `dotnet list package` imprime a severidade CAPITALIZADA ("High",
+      #     "Critical"). Um grep case-sensitive por "high" só pegava, por acidente, a linha de
+      #     warning NU1903 — que nem sempre existe (ver 2). Daí o -i e os \b.
+      #  2. o NuGetAuditMode default do SDK 8 é `direct`, então vulnerabilidade TRANSITIVA não gera
+      #     NU1903 nenhum. O csproj força `all` para o audit enxergar a árvore inteira.
+      - name: Vulnerabilidades em dependências
+        run: |
+          dotnet list package --vulnerable --include-transitive 2>&1 | tee vuln.txt
+          if grep -qiE '\b(high|critical)\b' vuln.txt; then
+            echo "::error::vulnerabilidade high/critical em dependência"
+            exit 1
+          fi
+          echo "nenhuma vulnerabilidade high/critical"
