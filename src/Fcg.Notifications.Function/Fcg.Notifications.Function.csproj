@@ -25,6 +25,7 @@
     <!-- O binding que aciona a função direto pelas filas do RabbitMQ que a plataforma já usa —
          é o que permite migrar para serverless sem tocar no backbone de mensageria. -->
     <PackageReference Include="Microsoft.Azure.Functions.Worker.Extensions.RabbitMQ" Version="2.1.0" />
+    <PackageReference Include="StackExchange.Redis" Version="2.13.17" />
   </ItemGroup>
 
   <ItemGroup>

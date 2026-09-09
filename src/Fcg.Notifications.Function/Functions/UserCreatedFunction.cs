@@ -1,5 +1,6 @@
 using Fcg.Contracts.Events;
 using Fcg.Notifications.Function.Email;
+using Fcg.Notifications.Function.Idempotency;
 using Fcg.Notifications.Function.Messaging;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
@@ -18,11 +19,16 @@ public sealed class UserCreatedFunction
 
     private readonly ILogger<UserCreatedFunction> _logger;
     private readonly IEmailSender _emailSender;
+    private readonly IProcessedMessageStore _store;
 
-    public UserCreatedFunction(ILogger<UserCreatedFunction> logger, IEmailSender emailSender)
+    public UserCreatedFunction(
+        ILogger<UserCreatedFunction> logger,
+        IEmailSender emailSender,
+        IProcessedMessageStore store)
     {
         _logger = logger;
         _emailSender = emailSender;
+        _store = store;
     }
 
     /// <summary>
@@ -84,8 +90,23 @@ public sealed class UserCreatedFunction
             "UserCreatedEvent recebido. UserId={UserId} Email={Email} ConversationId={ConversationId}",
             evento.UserId, LogSanitizer.MascararEmail(evento.Email), envelope.ConversationId);
 
-        // TODO(#3): o guard de idempotência entra AQUI, antes do envio — marcar depois de enviar
-        //           faria uma falha entre envio e marcação reenviar o e-mail na reentrega.
+        // IDEMPOTÊNCIA ANTES DO ENVIO: "reserva" a chave e só então manda o e-mail.
+        //
+        // O trade-off é consciente e é o mesmo que o notifications-api já fazia. Marcar ANTES
+        // significa que uma falha ENTRE a marcação e o envio perde o e-mail (a reentrega vê a
+        // chave e não reenvia). Marcar DEPOIS trocaria isso por "pode duplicar". Escolhemos
+        // at-most-once porque e-mail duplicado é visível e irritante para o cliente, enquanto
+        // perder um e-mail de boas-vindas é recuperável — e porque este caminho é o mesmo do
+        // serviço que estamos substituindo, então a migração não muda comportamento.
+        var inedito = await _store.TryMarkAsProcessedAsync(
+            nameof(UserCreatedEvent), evento.UserId, cancellationToken);
+
+        if (!inedito)
+        {
+            // O store já registrou o motivo no log.
+            return;
+        }
+
         var email = EmailTemplates.Welcome(evento);
         await _emailSender.SendAsync(email, cancellationToken);
 

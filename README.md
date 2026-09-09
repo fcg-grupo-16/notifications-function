@@ -7,13 +7,11 @@ container rodando 24/7 para uma tarefa esporádica.
 
 > **Grupo 16** — org GitHub [`fcg-grupo-16`](https://github.com/fcg-grupo-16)
 
-> **Estado atual:** issues #1 (bootstrap) e #2 (envio de e-mail) prontas — as funções recebem o
-> evento e **enviam o e-mail** (hoje simulado por log, como no `notifications-api`). Faltam
-> [#3 a #6](https://github.com/fcg-grupo-16/notifications-function/issues): idempotência em Redis,
-> histórico em MongoDB, empacotamento/IaC e observabilidade.
->
-> ⚠️ **Sem a #3 não há garantia de "e-mail enviado uma vez só".** Uma reentrega da mesma mensagem
-> hoje gera e-mail duplicado.
+> **Estado atual:** issues #1 (bootstrap), #2 (envio de e-mail) e #3 (idempotência) prontas — as
+> funções recebem o evento, enviam o e-mail (hoje simulado por log, como no `notifications-api`) e
+> **garantem envio único** mesmo entre reinícios do processo. Faltam
+> [#4 a #6](https://github.com/fcg-grupo-16/notifications-function/issues): histórico em MongoDB,
+> empacotamento/IaC e observabilidade.
 
 ## O que esta função faz
 
@@ -156,8 +154,49 @@ em que houver SMTP de verdade.
 1. **A confirmação de compra é endereçada ao `UserId`, não a um e-mail.** Comportamento herdado do
    `notifications-api`: `PaymentProcessedEvent` não carrega o endereço. Corrigir exige enriquecer o
    contrato do evento (compartilhado com `payments-api` e `catalog-api`) ou consultar o `users-api`.
-2. **Sem a issue #3 não há garantia de "enviado uma vez só".** Uma reentrega da mesma mensagem hoje
-   gera e-mail duplicado.
+2. **A janela de deduplicação é de 7 dias.** Reprocessar a dead-letter depois disso reenvia o
+   e-mail — ver a seção "Idempotência".
+
+## Idempotência
+
+O RabbitMQ entrega **at-least-once**: a mesma mensagem chega mais de uma vez em retentativa do
+host, requeue da extensão ou reprocessamento manual da dead-letter. Sem deduplicação, cada
+reentrega vira um e-mail a mais para o cliente.
+
+O `notifications-api` resolvia isso com um `ConcurrentDictionary` em memória. **Aqui isso não
+serve**, e a razão é a própria migração para serverless:
+
+1. **A Function escala a zero.** O KEDA termina o pod quando a fila esvazia; um dicionário em
+   memória morre junto. Uma reentrega chega num processo novo, com memória vazia, e reenvia.
+2. **`maxReplicaCount: 5`.** Sob rajada existem até cinco processos, cada um com seu próprio
+   dicionário, sem enxergar o do outro.
+
+Por isso o store é **durável e compartilhado**, em Redis, com `SET NX EX`:
+
+```
+SET fcg:notifications:processed:<TipoDoEvento>:<chave> <timestamp> NX EX 604800
+```
+
+| Decisão | Por quê |
+|---|---|
+| **`SET NX`**, não `EXISTS` + `SET` | uma operação **atômica** no servidor. "Consultar depois gravar" tem janela de corrida: dois pods passam pelo teste e os dois enviam |
+| **TTL de 7 dias** | cobre retentativa (segundos), requeue (minutos) e reprocessamento manual da DLQ (horas/dias), sem o keyspace crescer para sempre |
+| **Tipo do evento na chave** | o mesmo id pode aparecer em eventos diferentes e precisa ser deduplicado de forma independente |
+| **Marcar ANTES de enviar** | *at-most-once*. Falha entre marcação e envio perde o e-mail; a alternativa perderia a garantia de unicidade. E-mail duplicado é visível para o cliente; boas-vindas perdido é recuperável. Mesmo comportamento do `notifications-api` |
+| **Rejeitado não consome a chave** | um `PaymentProcessedEvent` com status `Rejected` **não** marca o `OrderId`, senão a confirmação legítima de um reprocessamento posterior (rejeitado → aprovado) ficaria bloqueada para sempre |
+
+### ⚠️ Fail-CLOSED — ao contrário do cache dos outros serviços
+
+Se o Redis estiver fora, o store **lança**, a mensagem é reentregue e, esgotadas as tentativas, vai
+para a dead-letter. É o oposto do `RedisCacheService` de `users-api`/`catalog-api`, que é
+fail-**open** de propósito.
+
+A diferença é o custo do erro: lá, cache fora significa consulta mais lenta; aqui, idempotência
+fora significa **e-mail duplicado para o cliente** — efeito colateral externo e irreversível.
+Preferimos não processar a processar duas vezes.
+
+Pelo mesmo motivo, a **falta da connection string é erro de startup**, não um fallback silencioso
+para memória — que reintroduziria exatamente o bug.
 
 ## Configuração
 

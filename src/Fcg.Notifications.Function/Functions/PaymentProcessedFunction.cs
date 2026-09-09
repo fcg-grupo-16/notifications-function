@@ -1,5 +1,6 @@
 using Fcg.Contracts.Events;
 using Fcg.Notifications.Function.Email;
+using Fcg.Notifications.Function.Idempotency;
 using Fcg.Notifications.Function.Messaging;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
@@ -16,11 +17,16 @@ public sealed class PaymentProcessedFunction
 
     private readonly ILogger<PaymentProcessedFunction> _logger;
     private readonly IEmailSender _emailSender;
+    private readonly IProcessedMessageStore _store;
 
-    public PaymentProcessedFunction(ILogger<PaymentProcessedFunction> logger, IEmailSender emailSender)
+    public PaymentProcessedFunction(
+        ILogger<PaymentProcessedFunction> logger,
+        IEmailSender emailSender,
+        IProcessedMessageStore store)
     {
         _logger = logger;
         _emailSender = emailSender;
+        _store = store;
     }
 
     /// <inheritdoc cref="UserCreatedFunction.RunAsync"/>
@@ -69,9 +75,19 @@ public sealed class PaymentProcessedFunction
             "PaymentProcessedEvent aprovado. OrderId={OrderId} UserId={UserId} GameId={GameId} ConversationId={ConversationId}",
             evento.OrderId, evento.UserId, evento.GameId, envelope.ConversationId);
 
-        // TODO(#3): idempotência por OrderId AQUI — e a chave só pode ser consumida neste caminho
-        //           aprovado: um evento "Rejected" que gastasse a chave bloquearia a confirmação
-        //           legítima de um reprocessamento posterior.
+        // A CHAVE SÓ É CONSUMIDA NO CAMINHO APROVADO — repare que este bloco está DEPOIS do
+        // `confirmacao is null`, não antes. Se um evento "Rejected" gastasse a chave do OrderId, a
+        // confirmação LEGÍTIMA de um reprocessamento posterior do mesmo pedido (rejeitado e depois
+        // aprovado) seria bloqueada para sempre. Detalhe sutil, portado 1:1 do
+        // PaymentProcessedConsumer — não mova este guard para cima.
+        var inedito = await _store.TryMarkAsProcessedAsync(
+            nameof(PaymentProcessedEvent), evento.OrderId.ToString(), cancellationToken);
+
+        if (!inedito)
+        {
+            return;
+        }
+
         await _emailSender.SendAsync(confirmacao, cancellationToken);
 
         // TODO(#4): persistir o histórico.
