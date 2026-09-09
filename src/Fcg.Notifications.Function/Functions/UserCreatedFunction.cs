@@ -1,4 +1,5 @@
 using Fcg.Contracts.Events;
+using Fcg.Notifications.Function.Email;
 using Fcg.Notifications.Function.Messaging;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
@@ -16,8 +17,13 @@ public sealed class UserCreatedFunction
     private const string TipoEsperado = "Fcg.Contracts.Events:UserCreatedEvent";
 
     private readonly ILogger<UserCreatedFunction> _logger;
+    private readonly IEmailSender _emailSender;
 
-    public UserCreatedFunction(ILogger<UserCreatedFunction> logger) => _logger = logger;
+    public UserCreatedFunction(ILogger<UserCreatedFunction> logger, IEmailSender emailSender)
+    {
+        _logger = logger;
+        _emailSender = emailSender;
+    }
 
     /// <summary>
     /// Processa um <see cref="UserCreatedEvent"/> entregue pela fila.
@@ -41,7 +47,7 @@ public sealed class UserCreatedFunction
     /// </para>
     /// </remarks>
     [Function(nameof(UserCreatedFunction))]
-    public Task RunAsync(
+    public async Task RunAsync(
         [RabbitMQTrigger("notifications-user-created", ConnectionStringSetting = "RabbitMqConnection")]
         string mensagem,
         CancellationToken cancellationToken)
@@ -57,7 +63,7 @@ public sealed class UserCreatedFunction
             _logger.LogWarning(
                 "Mensagem inválida ou de tipo inesperado na fila notifications-user-created; descartada.");
             _logger.LogDebug("Corpo descartado: {Corpo}", LogSanitizer.TruncarCorpo(mensagem));
-            return Task.CompletedTask;
+            return;
         }
 
         var evento = envelope.Message!;
@@ -71,16 +77,18 @@ public sealed class UserCreatedFunction
             _logger.LogWarning(
                 "UserCreatedEvent sem campo obrigatório (UserId ou Email); descartado. ConversationId={ConversationId}",
                 envelope.ConversationId);
-            return Task.CompletedTask;
+            return;
         }
 
         _logger.LogInformation(
             "UserCreatedEvent recebido. UserId={UserId} Email={Email} ConversationId={ConversationId}",
             evento.UserId, LogSanitizer.MascararEmail(evento.Email), envelope.ConversationId);
 
-        // TODO(#3): idempotência por UserId em Redis, ANTES do envio.
-        // TODO(#2): enviar o e-mail de boas-vindas via IEmailSender.
+        // TODO(#3): o guard de idempotência entra AQUI, antes do envio — marcar depois de enviar
+        //           faria uma falha entre envio e marcação reenviar o e-mail na reentrega.
+        var email = EmailTemplates.Welcome(evento);
+        await _emailSender.SendAsync(email, cancellationToken);
+
         // TODO(#4): persistir o histórico em notificationsdb (best-effort, depois do envio).
-        return Task.CompletedTask;
     }
 }

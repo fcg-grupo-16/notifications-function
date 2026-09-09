@@ -7,10 +7,13 @@ container rodando 24/7 para uma tarefa esporádica.
 
 > **Grupo 16** — org GitHub [`fcg-grupo-16`](https://github.com/fcg-grupo-16)
 
-> **Estado atual:** a issue #1 (bootstrap: trigger + parser do envelope + testes + CI) está pronta.
-> Faltam [#2 a #6](https://github.com/fcg-grupo-16/notifications-function/issues): envio de e-mail,
-> idempotência em Redis, histórico em MongoDB, empacotamento/IaC e observabilidade. Hoje as funções
-> **recebem e desembrulham** o evento e o registram no log — ainda não enviam e-mail.
+> **Estado atual:** issues #1 (bootstrap) e #2 (envio de e-mail) prontas — as funções recebem o
+> evento e **enviam o e-mail** (hoje simulado por log, como no `notifications-api`). Faltam
+> [#3 a #6](https://github.com/fcg-grupo-16/notifications-function/issues): idempotência em Redis,
+> histórico em MongoDB, empacotamento/IaC e observabilidade.
+>
+> ⚠️ **Sem a #3 não há garantia de "e-mail enviado uma vez só".** Uma reentrega da mesma mensagem
+> hoje gera e-mail duplicado.
 
 ## O que esta função faz
 
