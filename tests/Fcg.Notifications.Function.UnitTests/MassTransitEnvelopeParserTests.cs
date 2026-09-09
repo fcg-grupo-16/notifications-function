@@ -241,3 +241,109 @@ public sealed class MassTransitEnvelopeParserTests
         Assert.Equal((decimal)esperado, envelope!.Message!.Price);
     }
 }
+
+/// <summary>
+/// Casos que o parser PRECISA sobreviver sem lançar. O contrato de poison message do repositório
+/// (loga, descarta, faz ack) só é válido se <c>TryParse</c> nunca lançar — quando ele lançava com
+/// <c>"messageType": null</c>, a mesma mensagem era executada 20 vezes e ia para a dead-letter.
+/// </summary>
+public sealed class MassTransitEnvelopeParserRobustezTests
+{
+    private const string TipoUserCreated = "Fcg.Contracts.Events:UserCreatedEvent";
+
+    [Theory(DisplayName = "Nunca lança: devolve null para qualquer corpo hostil")]
+    // messageType nulo/parcialmente nulo — o caso que quebrava em produção.
+    [InlineData("""{"messageType":null,"message":{"userId":"u","nome":"n","email":"e@x.com"}}""")]
+    [InlineData("""{"messageType":[null],"message":{"userId":"u","nome":"n","email":"e@x.com"}}""")]
+    [InlineData("""{"messageType":[],"message":{"userId":"u","nome":"n","email":"e@x.com"}}""")]
+    // messageType com o tipo errado de JSON
+    [InlineData("""{"messageType":"urn:message:Fcg.Contracts.Events:UserCreatedEvent","message":{"userId":"u"}}""")]
+    [InlineData("""{"messageType":123,"message":{"userId":"u"}}""")]
+    // message com o tipo errado de JSON
+    [InlineData("""{"messageType":["urn:message:Fcg.Contracts.Events:UserCreatedEvent"],"message":[]}""")]
+    [InlineData("""{"messageType":["urn:message:Fcg.Contracts.Events:UserCreatedEvent"],"message":"texto"}""")]
+    [InlineData("""{"messageType":["urn:message:Fcg.Contracts.Events:UserCreatedEvent"],"message":null}""")]
+    // corpo que nem é objeto
+    [InlineData("123")]
+    [InlineData("true")]
+    [InlineData("\"apenas uma string\"")]
+    [InlineData("{}")]
+    public void TryParse_CorpoHostil_NaoLancaEDevolveNull(string json)
+    {
+        var excecao = Record.Exception(
+            () => MassTransitEnvelopeParser.TryParse<UserCreatedEvent>(json, TipoUserCreated));
+
+        Assert.Null(excecao);
+        Assert.Null(MassTransitEnvelopeParser.TryParse<UserCreatedEvent>(json, TipoUserCreated));
+    }
+
+    [Fact(DisplayName = "Entrada null no array de messageType não impede reconhecer a URN válida ao lado")]
+    public void TryParse_MessageTypeComNullEUrnValida_EhAceito()
+    {
+        // Este NÃO é caso de rejeição: há uma URN válida no array. O ponto é que a entrada nula
+        // não pode fazer o parser lançar (era NullReferenceException antes da correção).
+        const string json = """
+        {"messageType":[null,"urn:message:Fcg.Contracts.Events:UserCreatedEvent"],
+         "message":{"userId":"u","nome":"n","email":"e@x.com"}}
+        """;
+
+        var excecao = Record.Exception(
+            () => MassTransitEnvelopeParser.TryParse<UserCreatedEvent>(json, TipoUserCreated));
+
+        Assert.Null(excecao);
+        Assert.NotNull(MassTransitEnvelopeParser.TryParse<UserCreatedEvent>(json, TipoUserCreated));
+    }
+
+    [Theory(DisplayName = "URN de outro namespace terminada igual é REJEITADA (não basta EndsWith)")]
+    [InlineData("urn:message:Atacante.Fcg.Contracts.Events:UserCreatedEvent")]
+    [InlineData("urn:message:XFcg.Contracts.Events:UserCreatedEvent")]
+    [InlineData("urn:message:Outro.Namespace.Fcg.Contracts.Events:UserCreatedEvent")]
+    public void TryParse_UrnDeOutroNamespace_EhRejeitada(string urn)
+    {
+        // Com EndsWith, todos estes passavam e a função processava um evento forjado.
+        var json =
+            "{\"messageType\":[\"" + urn + "\"],"
+            + "\"message\":{\"userId\":\"FORJADO\",\"nome\":\"x\",\"email\":\"atacante@evil.com\"}}";
+
+        Assert.Null(MassTransitEnvelopeParser.TryParse<UserCreatedEvent>(json, TipoUserCreated));
+    }
+
+    [Fact(DisplayName = "URN correta continua sendo aceita (o teste acima não pode ser rígido demais)")]
+    public void TryParse_UrnCorreta_EhAceita()
+    {
+        const string json = """
+        {"messageType":["urn:message:Fcg.Contracts.Events:UserCreatedEvent"],
+         "message":{"userId":"u","nome":"n","email":"e@x.com"}}
+        """;
+
+        Assert.NotNull(MassTransitEnvelopeParser.TryParse<UserCreatedEvent>(json, TipoUserCreated));
+    }
+
+    [Fact(DisplayName = "Comparação de URN é case-sensitive (nomes de tipo CLR são)")]
+    public void TryParse_UrnComCaixaDiferente_EhRejeitada()
+    {
+        const string json = """
+        {"messageType":["urn:message:fcg.contracts.events:usercreatedevent"],
+         "message":{"userId":"u","nome":"n","email":"e@x.com"}}
+        """;
+
+        Assert.Null(MassTransitEnvelopeParser.TryParse<UserCreatedEvent>(json, TipoUserCreated));
+    }
+
+    [Theory(DisplayName = "AllowReadingFromString não afrouxa conversões que deveriam falhar")]
+    [InlineData("\"price\":\"abc\"")]
+    [InlineData("\"price\":\"\"")]
+    [InlineData("\"price\":\"29,90\"")]   // vírgula decimal: STJ sempre parseia em cultura invariante
+    [InlineData("\"orderId\":123")]
+    [InlineData("\"status\":123")]
+    public void TryParse_ConversoesInvalidas_ContinuamRejeitadas(string campoRuim)
+    {
+        var json =
+            "{\"messageType\":[\"urn:message:Fcg.Contracts.Events:PaymentProcessedEvent\"],"
+            + "\"message\":{\"orderId\":\"3f2504e0-4f89-11d3-9a0c-0305e82c3301\",\"userId\":\"u\","
+            + "\"gameId\":\"g\",\"price\":\"1\",\"status\":\"Approved\"," + campoRuim + "}}";
+
+        Assert.Null(MassTransitEnvelopeParser.TryParse<PaymentProcessedEvent>(
+            json, "Fcg.Contracts.Events:PaymentProcessedEvent"));
+    }
+}

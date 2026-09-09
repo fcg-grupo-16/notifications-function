@@ -39,8 +39,15 @@ public sealed record MassTransitEnvelope<T> where T : class
     /// URNs do tipo da mensagem, ex.: <c>urn:message:Fcg.Contracts.Events:UserCreatedEvent</c>.
     /// Usado para VALIDAR que a mensagem que chegou nesta fila é a esperada.
     /// </summary>
+    /// <remarks>
+    /// ANULÁVEL de propósito, e o inicializador <c>= []</c> não bastaria: quando o JSON traz
+    /// <c>"messageType": null</c>, o System.Text.Json SOBRESCREVE o valor default com <c>null</c>.
+    /// Declarar não-anulável aqui foi o que fez o parser lançar <c>ArgumentNullException</c> num
+    /// corpo trivial — e, como o desenho todo depende de o parser nunca lançar, a mensagem era
+    /// retentada 20 vezes e ia parar na dead-letter.
+    /// </remarks>
     [JsonPropertyName("messageType")]
-    public string[] MessageType { get; init; } = [];
+    public string[]? MessageType { get; init; }
 
     /// <summary>O evento de domínio propriamente dito.</summary>
     [JsonPropertyName("message")]
@@ -79,6 +86,9 @@ public static class MassTransitEnvelopeParser
     /// "processa com sucesso" enviando e-mail para destinatário vazio. É o bug mais provável deste
     /// componente, e existe teste dedicado para ele.
     /// </remarks>
+    /// <summary>Prefixo que o MassTransit usa nas URNs de tipo de mensagem.</summary>
+    private const string UrnPrefixo = "urn:message:";
+
     private static readonly JsonSerializerOptions Options = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -122,24 +132,34 @@ public static class MassTransitEnvelopeParser
             return null;
         }
 
-        MassTransitEnvelope<T>? envelope;
+        // CATCH ABRANGENTE, e não só JsonException: este método é o guarda que impede que uma
+        // mensagem malformada vire exceção, retentativa e dead-letter. Qualquer coisa que escape
+        // daqui quebra esse contrato — foi o que aconteceu com ArgumentNullException vindo do LINQ
+        // sobre um `messageType: null`. Preferimos engolir e devolver null a deixar o chamador
+        // descobrir uma exceção nova em produção.
         try
         {
-            envelope = JsonSerializer.Deserialize<MassTransitEnvelope<T>>(body, Options);
+            var envelope = JsonSerializer.Deserialize<MassTransitEnvelope<T>>(body, Options);
+
+            if (envelope?.Message is null)
+            {
+                return null;
+            }
+
+            var urnEsperada = UrnPrefixo + expectedTypeUrnSuffix;
+
+            // Comparação EXATA e Ordinal, não EndsWith. Com EndsWith, um
+            // `urn:message:Atacante.Fcg.Contracts.Events:UserCreatedEvent` passaria na validação —
+            // verificado. E nomes de tipo CLR são case-sensitive, então OrdinalIgnoreCase estaria
+            // errado mesmo sem o problema do sufixo.
+            var tipoConfere = envelope.MessageType is { } tipos
+                && tipos.Any(urn => string.Equals(urn, urnEsperada, StringComparison.Ordinal));
+
+            return tipoConfere ? envelope : null;
         }
-        catch (JsonException)
+        catch (Exception)
         {
             return null;
         }
-
-        if (envelope is null || envelope.Message is null)
-        {
-            return null;
-        }
-
-        var tipoConfere = envelope.MessageType.Any(urn =>
-            urn.EndsWith(expectedTypeUrnSuffix, StringComparison.OrdinalIgnoreCase));
-
-        return tipoConfere ? envelope : null;
     }
 }

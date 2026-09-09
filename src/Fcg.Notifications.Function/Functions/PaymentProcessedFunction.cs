@@ -29,15 +29,24 @@ public sealed class PaymentProcessedFunction
     {
         var envelope = MassTransitEnvelopeParser.TryParse<PaymentProcessedEvent>(mensagem, TipoEsperado);
 
-        if (envelope?.Message is null)
+        if (envelope is null)
         {
             _logger.LogWarning(
-                "Mensagem inválida ou de tipo inesperado na fila notifications-payment-processed; descartada. Corpo: {Body}",
-                Truncar(mensagem));
+                "Mensagem inválida ou de tipo inesperado na fila notifications-payment-processed; descartada.");
+            _logger.LogDebug("Corpo descartado: {Corpo}", LogSanitizer.TruncarCorpo(mensagem));
             return Task.CompletedTask;
         }
 
-        var evento = envelope.Message;
+        var evento = envelope.Message!;
+
+        // Ver UserCreatedFunction: o contrato declara não-anulável, mas o JSON pode trazer null.
+        if (evento.OrderId == Guid.Empty || string.IsNullOrWhiteSpace(evento.UserId))
+        {
+            _logger.LogWarning(
+                "PaymentProcessedEvent sem campo obrigatório (OrderId ou UserId); descartado. ConversationId={ConversationId}",
+                envelope.ConversationId);
+            return Task.CompletedTask;
+        }
 
         // Regra de negócio portada do PaymentProcessedConsumer: só pagamento APROVADO gera e-mail.
         // Na issue #2 esta verificação passa a ser feita por EmailTemplates.PurchaseConfirmation,
@@ -61,7 +70,4 @@ public sealed class PaymentProcessedFunction
         // TODO(#4): persistir o histórico.
         return Task.CompletedTask;
     }
-
-    private static string Truncar(string? body) =>
-        body is null ? "(vazio)" : body.Length > 500 ? body[..500] + "…" : body;
 }

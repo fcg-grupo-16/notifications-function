@@ -19,8 +19,9 @@ container rodando 24/7 para uma tarefa esporádica.
 | `UserCreatedEvent` | `notifications-user-created` | envia e-mail de boas-vindas |
 | `PaymentProcessedEvent` | `notifications-payment-processed` | envia confirmação de compra (**só** se `Status == "Approved"`) |
 
-**Stack:** Azure Functions v4 · isolated worker · .NET 8 · binding `RabbitMQTrigger` ·
-Redis (idempotência) · MongoDB (`notificationsdb`, histórico) · KEDA (scale-to-zero no Kubernetes).
+**Stack (alvo):** Azure Functions v4 · isolated worker · .NET 8 · binding `RabbitMQTrigger` ·
+Redis (idempotência, #3) · MongoDB (`notificationsdb`, histórico, #4) · KEDA (scale-to-zero, #5 e
+`orchestration#29`). **Entregue até aqui:** Functions v4 + isolated worker + `RabbitMQTrigger`.
 
 ## Decisões de arquitetura
 
@@ -68,7 +69,7 @@ O corpo da mensagem **não** é o evento cru: é o **envelope do MassTransit**
   "messageType": ["urn:message:Fcg.Contracts.Events:UserCreatedEvent"],
   "message": { "userId": "...", "nome": "...", "email": "..." },
   "sentTime": "2026-09-08T12:00:00Z",
-  "headers": { "Diagnostic-Id": "00-<traceId>-<spanId>-01" }
+  "headers": {}
 }
 ```
 

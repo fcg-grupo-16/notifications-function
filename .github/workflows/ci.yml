@@ -37,11 +37,16 @@ jobs:
       - name: Testes
         run: dotnet test --no-build --configuration Release --verbosity normal
 
-      # Mesmo gate de segurança dos outros repos do grupo.
+      # Gate de segurança. Dois detalhes que já fizeram este gate ser um no-op noutro momento:
+      #  1. o relatório do `dotnet list package` imprime a severidade CAPITALIZADA ("High",
+      #     "Critical"). Um grep case-sensitive por "high" só pegava, por acidente, a linha de
+      #     warning NU1903 — que nem sempre existe (ver 2). Daí o -i e os \b.
+      #  2. o NuGetAuditMode default do SDK 8 é `direct`, então vulnerabilidade TRANSITIVA não gera
+      #     NU1903 nenhum. O csproj força `all` para o audit enxergar a árvore inteira.
       - name: Vulnerabilidades em dependências
         run: |
           dotnet list package --vulnerable --include-transitive 2>&1 | tee vuln.txt
-          if grep -qE "critical|high" vuln.txt; then
+          if grep -qiE '\b(high|critical)\b' vuln.txt; then
             echo "::error::vulnerabilidade high/critical em dependência"
             exit 1
           fi
