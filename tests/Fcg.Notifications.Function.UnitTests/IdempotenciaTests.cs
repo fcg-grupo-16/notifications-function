@@ -15,27 +15,51 @@ namespace Fcg.Notifications.Function.UnitTests;
 /// atomicidade do <c>SET NX EX</c> no servidor e a durabilidade da chave — as duas propriedades
 /// que o dicionário do <c>notifications-api</c> não tinha.
 /// </remarks>
-public sealed class RedisProcessedMessageStoreTests : IAsyncLifetime
+/// <summary>
+/// Container Redis COMPARTILHADO por toda a classe de teste.
+/// </summary>
+/// <remarks>
+/// Com <c>IAsyncLifetime</c> na própria classe de teste, o xUnit cria uma instância nova por método
+/// e subia um container por teste — dez containers por execução, lentos e FLAKY (um teste chegou a
+/// falhar e passar na execução seguinte, sem mudança de código). Um fixture de classe sobe UM
+/// container. Os testes já usam chaves distintas entre si, então compartilhar a instância não
+/// cria interferência.
+/// </remarks>
+public sealed class RedisFixture : IAsyncLifetime
 {
     private readonly RedisContainer _redis = new RedisBuilder()
         .WithImage("redis:7.4.1-alpine")
         .Build();
 
-    private IConnectionMultiplexer _multiplexer = null!;
-    private RedisProcessedMessageStore _store = null!;
+    public IConnectionMultiplexer Multiplexer { get; private set; } = null!;
+
+    public string ConnectionString => _redis.GetConnectionString();
 
     public async Task InitializeAsync()
     {
         await _redis.StartAsync();
-        _multiplexer = await ConnectionMultiplexer.ConnectAsync(_redis.GetConnectionString());
-        _store = new RedisProcessedMessageStore(
-            _multiplexer, NullLogger<RedisProcessedMessageStore>.Instance);
+        Multiplexer = await ConnectionMultiplexer.ConnectAsync(ConnectionString);
     }
 
     public async Task DisposeAsync()
     {
-        await _multiplexer.DisposeAsync();
+        await Multiplexer.DisposeAsync();
         await _redis.DisposeAsync();
+    }
+}
+
+public sealed class RedisProcessedMessageStoreTests : IClassFixture<RedisFixture>
+{
+    private readonly RedisFixture _fixture;
+    private readonly IConnectionMultiplexer _multiplexer;
+    private readonly RedisProcessedMessageStore _store;
+
+    public RedisProcessedMessageStoreTests(RedisFixture fixture)
+    {
+        _fixture = fixture;
+        _multiplexer = fixture.Multiplexer;
+        _store = new RedisProcessedMessageStore(
+            _multiplexer, NullLogger<RedisProcessedMessageStore>.Instance);
     }
 
     [Fact(DisplayName = "Primeira vez marca a chave; segunda vez é reconhecida como duplicata")]
@@ -107,7 +131,7 @@ public sealed class RedisProcessedMessageStoreTests : IAsyncLifetime
         Assert.True(await _store.TryMarkAsProcessedAsync("UserCreatedEvent", chave));
 
         // Simula processo novo: multiplexer e store completamente novos, mesmo Redis.
-        await using var outroMultiplexer = await ConnectionMultiplexer.ConnectAsync(_redis.GetConnectionString());
+        await using var outroMultiplexer = await ConnectionMultiplexer.ConnectAsync(_fixture.ConnectionString);
         var outroStore = new RedisProcessedMessageStore(
             outroMultiplexer, NullLogger<RedisProcessedMessageStore>.Instance);
 
@@ -119,7 +143,11 @@ public sealed class RedisProcessedMessageStoreTests : IAsyncLifetime
     {
         // Contrato de teste, não de implementação: se alguém acrescentar um try/catch aqui achando
         // que está "deixando mais robusto", reintroduz o risco de e-mail duplicado.
-        var opcoes = ConfigurationOptions.Parse("127.0.0.1:6399");   // porta morta
+        // Porta obtida do SO (bind em 0) e imediatamente liberada, em vez de um número fixo.
+        // Com porta fixa o teste é FLAKY: se qualquer coisa estiver escutando nela, ele falha com
+        // "No exception was thrown" — aconteceu de verdade durante a revisão deste PR.
+        var portaLivre = ObterPortaLivre();
+        var opcoes = ConfigurationOptions.Parse($"127.0.0.1:{portaLivre}");
         opcoes.AbortOnConnectFail = false;
         opcoes.ConnectTimeout = 500;
         opcoes.SyncTimeout = 500;
@@ -131,6 +159,55 @@ public sealed class RedisProcessedMessageStoreTests : IAsyncLifetime
 
         await Assert.ThrowsAnyAsync<Exception>(
             () => store.TryMarkAsProcessedAsync("UserCreatedEvent", "qualquer"));
+    }
+
+    [Fact(DisplayName = "UnmarkAsync libera a chave para reprocessamento (compensação)")]
+    public async Task Unmark_LiberaAChave()
+    {
+        const string chave = "usuario-compensado";
+
+        Assert.True(await _store.TryMarkAsProcessedAsync("UserCreatedEvent", chave));
+        Assert.False(await _store.TryMarkAsProcessedAsync("UserCreatedEvent", chave));
+
+        await _store.UnmarkAsync("UserCreatedEvent", chave);
+
+        // Depois da compensação a mesma chave volta a ser inédita — é o que permite a reentrega
+        // reenviar o e-mail que o envio falhado perdeu.
+        Assert.True(await _store.TryMarkAsProcessedAsync("UserCreatedEvent", chave));
+    }
+
+    [Fact(DisplayName = "UnmarkAsync de chave inexistente não lança")]
+    public async Task Unmark_ChaveInexistente_NaoLanca()
+    {
+        var excecao = await Record.ExceptionAsync(
+            () => _store.UnmarkAsync("UserCreatedEvent", "nunca-existiu"));
+
+        Assert.Null(excecao);
+    }
+
+    [Fact(DisplayName = "Token já cancelado impede a gravação da chave")]
+    public async Task TryMark_TokenCancelado_NaoGrava()
+    {
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            () => _store.TryMarkAsProcessedAsync("UserCreatedEvent", "usuario-cancelado", cts.Token));
+
+        var existe = await _multiplexer.GetDatabase()
+            .KeyExistsAsync("fcg:notifications:processed:UserCreatedEvent:usuario-cancelado");
+
+        Assert.False(existe);
+    }
+
+    /// <summary>Pede ao SO uma porta TCP livre e a devolve imediatamente.</summary>
+    private static int ObterPortaLivre()
+    {
+        using var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        listener.Start();
+        var porta = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        return porta;
     }
 }
 
@@ -165,19 +242,56 @@ public sealed class FunctionsIdempotenciaTests
         Assert.Single(sender.Enviados);
     }
 
-    [Fact(DisplayName = "A chave é marcada ANTES do envio (at-most-once)")]
-    public async Task UserCreated_MarcaAntesDeEnviar()
+    [Fact(DisplayName = "Falha de envio COMPENSA a marcação — a reentrega volta a poder enviar")]
+    public async Task UserCreated_FalhaDeEnvio_CompensaAMarcacao()
     {
-        // Com o sender lançando, o e-mail não sai — mas a chave já tem de estar marcada, que é
-        // exatamente o trade-off documentado: preferimos perder um e-mail a duplicá-lo.
-        var sender = new EmailSenderEspiao(new InvalidOperationException("falhou"));
+        // Sem compensação, marcar-antes-de-enviar tornava a perda PERMANENTE: a reentrega veria a
+        // chave, sairia calada, o host daria ack e o e-mail desapareceria sem log de erro e sem ir
+        // para a dead-letter. É também o que mantém verdadeiro o contrato de IEmailSender
+        // ("falha transitória deve lançar, a reentrega resolve").
+        var senderQueFalha = new EmailSenderEspiao(new InvalidOperationException("SMTP fora"));
         var store = new StoreEspiao();
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            new UserCreatedFunction(NullLogger<UserCreatedFunction>.Instance, sender, store)
+            new UserCreatedFunction(NullLogger<UserCreatedFunction>.Instance, senderQueFalha, store)
                 .RunAsync(EnvelopeUserCreated("u-1"), CancellationToken.None));
 
+        Assert.Equal(1, store.Compensacoes);
+        Assert.DoesNotContain("UserCreatedEvent:u-1", store.Marcadas);
+
+        // A REENTREGA (mesmo evento, sender saudável) consegue enviar.
+        var senderSaudavel = new EmailSenderEspiao();
+        await new UserCreatedFunction(NullLogger<UserCreatedFunction>.Instance, senderSaudavel, store)
+            .RunAsync(EnvelopeUserCreated("u-1"), CancellationToken.None);
+
+        Assert.Single(senderSaudavel.Enviados);
+    }
+
+    [Fact(DisplayName = "Envio bem-sucedido NÃO compensa (a chave fica marcada)")]
+    public async Task UserCreated_EnvioComSucesso_NaoCompensa()
+    {
+        var sender = new EmailSenderEspiao();
+        var store = new StoreEspiao();
+
+        await new UserCreatedFunction(NullLogger<UserCreatedFunction>.Instance, sender, store)
+            .RunAsync(EnvelopeUserCreated("u-1"), CancellationToken.None);
+
+        Assert.Equal(0, store.Compensacoes);
         Assert.Contains("UserCreatedEvent:u-1", store.Marcadas);
+    }
+
+    [Fact(DisplayName = "Falha de envio na confirmação de compra também compensa")]
+    public async Task PaymentProcessed_FalhaDeEnvio_CompensaAMarcacao()
+    {
+        var senderQueFalha = new EmailSenderEspiao(new InvalidOperationException("SMTP fora"));
+        var store = new StoreEspiao();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new PaymentProcessedFunction(NullLogger<PaymentProcessedFunction>.Instance, senderQueFalha, store)
+                .RunAsync(EnvelopePagamento("Approved"), CancellationToken.None));
+
+        Assert.Equal(1, store.Compensacoes);
+        Assert.Empty(store.Marcadas);
     }
 
     [Fact(DisplayName = "Falha do store PROPAGA — sem idempotência, não se envia (fail-closed)")]

@@ -49,7 +49,7 @@ public sealed class PaymentProcessedFunction
         var evento = envelope.Message!;
 
         // Ver UserCreatedFunction: o contrato declara não-anulável, mas o JSON pode trazer null.
-        if (evento.OrderId == Guid.Empty || string.IsNullOrWhiteSpace(evento.UserId))
+        if (evento.OrderId == Guid.Empty || !LogSanitizer.IdentificadorEhAceitavel(evento.UserId))
         {
             _logger.LogWarning(
                 "PaymentProcessedEvent sem campo obrigatório (OrderId ou UserId); descartado. ConversationId={ConversationId}",
@@ -88,7 +88,20 @@ public sealed class PaymentProcessedFunction
             return;
         }
 
-        await _emailSender.SendAsync(confirmacao, cancellationToken);
+        // COMPENSAÇÃO: se o envio falhar, a marcação é desfeita para a reentrega poder tentar de
+        // novo. Sem isto, marcar-antes-de-enviar tornaria a perda PERMANENTE — a reentrega veria a
+        // chave, sairia calada, o host daria ack, e o e-mail desapareceria sem log de erro e sem ir
+        // para a dead-letter. É também o que mantém verdadeiro o contrato de IEmailSender ("falha
+        // transitória deve lançar, a reentrega resolve").
+        try
+        {
+            await _emailSender.SendAsync(confirmacao, cancellationToken);
+        }
+        catch
+        {
+            await _store.UnmarkAsync(nameof(PaymentProcessedEvent), evento.OrderId.ToString(), cancellationToken);
+            throw;
+        }
 
         // TODO(#4): persistir o histórico.
     }

@@ -78,7 +78,8 @@ public sealed class UserCreatedFunction
         // SOBRESCREVE o default com null quando o JSON traz `"email": null` — então a garantia do
         // tipo não vale para dado que veio da rede. Sem esta checagem, a issue #2 enviaria e-mail
         // para destinatário nulo ou estouraria NullReferenceException dentro do IEmailSender.
-        if (string.IsNullOrWhiteSpace(evento.UserId) || !LogSanitizer.DestinatarioEhAceitavel(evento.Email))
+        if (!LogSanitizer.IdentificadorEhAceitavel(evento.UserId)
+            || !LogSanitizer.DestinatarioEhAceitavel(evento.Email))
         {
             _logger.LogWarning(
                 "UserCreatedEvent com UserId ausente ou destinatário inaceitável; descartado. ConversationId={ConversationId}",
@@ -107,8 +108,21 @@ public sealed class UserCreatedFunction
             return;
         }
 
-        var email = EmailTemplates.Welcome(evento);
-        await _emailSender.SendAsync(email, cancellationToken);
+        // COMPENSAÇÃO: se o envio falhar, a marcação é desfeita para a reentrega poder tentar de
+        // novo. Sem isto, marcar-antes-de-enviar tornaria a perda PERMANENTE — a reentrega veria a
+        // chave, sairia calada, o host daria ack, e o e-mail desapareceria sem log de erro e sem ir
+        // para a dead-letter. É também o que mantém verdadeiro o contrato de IEmailSender ("falha
+        // transitória deve lançar, a reentrega resolve").
+        try
+        {
+            var email = EmailTemplates.Welcome(evento);
+            await _emailSender.SendAsync(email, cancellationToken);
+        }
+        catch
+        {
+            await _store.UnmarkAsync(nameof(UserCreatedEvent), evento.UserId, cancellationToken);
+            throw;
+        }
 
         // TODO(#4): persistir o histórico em notificationsdb (best-effort, depois do envio).
     }

@@ -35,4 +35,27 @@ public interface IProcessedMessageStore
     /// A operação deve ser atômica para evitar corrida entre reentregas concorrentes.
     /// </summary>
     Task<bool> TryMarkAsProcessedAsync(string messageType, string naturalKey, CancellationToken ct = default);
+
+    /// <summary>
+    /// Desfaz a marcação, liberando a chave para ser processada de novo.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Existe para COMPENSAR uma falha depois da marcação. A marcação acontece ANTES do envio, para
+    /// não duplicar e-mail; mas se o envio falhar, deixar a chave marcada tornaria a perda
+    /// PERMANENTE — a reentrega veria a chave, sairia calada e o host daria ack. O e-mail
+    /// desapareceria sem log de erro e sem ir para a dead-letter.
+    /// </para>
+    /// <para>
+    /// Isso também é o que mantém verdadeiro o contrato documentado em
+    /// <see cref="Email.IEmailSender"/>: "falha transitória deve lançar, a reentrega resolve". Sem
+    /// compensação, a reentrega deixaria de resolver.
+    /// </para>
+    /// <para>
+    /// Falha aqui é registrada e engolida: já estamos no caminho de erro, e não há o que fazer
+    /// além de deixar a mensagem seguir para a retentativa. O efeito de uma compensação perdida é
+    /// voltar ao comportamento at-most-once para aquela mensagem — degradação, não corrupção.
+    /// </para>
+    /// </remarks>
+    Task UnmarkAsync(string messageType, string naturalKey, CancellationToken ct = default);
 }

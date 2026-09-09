@@ -41,17 +41,19 @@ internal sealed class EmailSenderEspiao : IEmailSender
 /// </summary>
 internal sealed class StoreEspiao : IProcessedMessageStore
 {
-    private readonly bool _sempreDuplicado;
     private readonly Exception? _erroParaLancar;
-    private readonly HashSet<string> _vistos = [];
 
-    public StoreEspiao(bool sempreDuplicado = false, Exception? erroParaLancar = null)
-    {
-        _sempreDuplicado = sempreDuplicado;
-        _erroParaLancar = erroParaLancar;
-    }
+    public StoreEspiao(Exception? erroParaLancar = null) => _erroParaLancar = erroParaLancar;
 
-    public List<string> Marcadas { get; } = [];
+    /// <summary>
+    /// Chaves atualmente MARCADAS — fiel ao store real: uma chamada que reconhece duplicata não
+    /// acrescenta nada, e <see cref="UnmarkAsync"/> remove. (Antes esta lista registrava
+    /// "chamadas" e não "marcações", o que daria falso positivo num teste de "marcada uma vez".)
+    /// </summary>
+    public HashSet<string> Marcadas { get; } = [];
+
+    /// <summary>Quantas vezes a compensação foi acionada.</summary>
+    public int Compensacoes { get; private set; }
 
     public Task<bool> TryMarkAsProcessedAsync(string messageType, string naturalKey, CancellationToken ct = default)
     {
@@ -60,15 +62,17 @@ internal sealed class StoreEspiao : IProcessedMessageStore
             throw _erroParaLancar;
         }
 
-        Marcadas.Add($"{messageType}:{naturalKey}");
-
-        if (_sempreDuplicado)
-        {
-            return Task.FromResult(false);
-        }
-
-        return Task.FromResult(_vistos.Add($"{messageType}:{naturalKey}"));
+        return Task.FromResult(Marcadas.Add(Chave(messageType, naturalKey)));
     }
+
+    public Task UnmarkAsync(string messageType, string naturalKey, CancellationToken ct = default)
+    {
+        Marcadas.Remove(Chave(messageType, naturalKey));
+        Compensacoes++;
+        return Task.CompletedTask;
+    }
+
+    private static string Chave(string messageType, string naturalKey) => $"{messageType}:{naturalKey}";
 }
 
 /// <summary>

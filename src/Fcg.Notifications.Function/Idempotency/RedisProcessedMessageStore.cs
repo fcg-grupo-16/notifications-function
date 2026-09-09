@@ -63,7 +63,14 @@ public sealed class RedisProcessedMessageStore : IProcessedMessageStore
         // O TIPO faz parte da chave: o mesmo identificador natural pode aparecer em eventos
         // diferentes (um OrderId em PaymentProcessed e, no futuro, num OrderRefunded), e eles
         // precisam ser deduplicados de forma independente.
-        var chave = $"{_prefixoDeChave}processed:{messageType}:{naturalKey}";
+        var chave = Chave(messageType, naturalKey);
+
+        // O StackExchange.Redis não tem sobrecarga assíncrona com CancellationToken, então honramos
+        // o token no ponto em que é possível: antes de emitir o comando. Sem isto o parâmetro da
+        // interface era decorativo — verificado que um token JÁ CANCELADO não impedia o SET.
+        // Durante o desligamento por scale-to-zero, isso evita gravar uma chave para uma mensagem
+        // que não vai ser processada.
+        ct.ThrowIfCancellationRequested();
 
         // Deliberadamente SEM try/catch: fail-closed (ver <remarks> da classe). Engolir a falha e
         // devolver true faria a Function enviar e-mail sem nenhuma garantia de unicidade.
@@ -79,4 +86,31 @@ public sealed class RedisProcessedMessageStore : IProcessedMessageStore
 
         return inedito;
     }
+
+    /// <inheritdoc />
+    public async Task UnmarkAsync(string messageType, string naturalKey, CancellationToken ct = default)
+    {
+        var chave = Chave(messageType, naturalKey);
+
+        // Ao contrário do TryMark, este método ENGOLE a falha: já estamos no caminho de erro (o
+        // envio falhou), e a mensagem vai ser reentregue de qualquer forma. Lançar aqui só trocaria
+        // a exceção original por outra, escondendo a causa real.
+        try
+        {
+            await _multiplexer.GetDatabase().KeyDeleteAsync(chave);
+        }
+        catch (Exception ex)
+        {
+            // Consequência concreta: sem a compensação, esta mensagem específica volta a ser
+            // at-most-once — a reentrega vai ver a chave e não reenviar. Por isso é Warning e não
+            // Debug: alguém precisa saber que um e-mail pode ter sido perdido.
+            _logger.LogWarning(ex,
+                "Falha ao compensar a marcação de idempotência de {MessageType}:{NaturalKey}. "
+                + "A reentrega desta mensagem NÃO vai reenviar o e-mail.",
+                messageType, naturalKey);
+        }
+    }
+
+    private string Chave(string messageType, string naturalKey) =>
+        $"{_prefixoDeChave}processed:{messageType}:{naturalKey}";
 }

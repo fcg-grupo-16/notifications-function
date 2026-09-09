@@ -171,7 +171,8 @@ serve**, e a razão é a própria migração para serverless:
 2. **`maxReplicaCount: 5`.** Sob rajada existem até cinco processos, cada um com seu próprio
    dicionário, sem enxergar o do outro.
 
-Por isso o store é **durável e compartilhado**, em Redis, com `SET NX EX`:
+Por isso o store é **compartilhado entre réplicas e sobrevive ao reinício do processo**, em
+Redis, com `SET NX EX`:
 
 ```
 SET fcg:notifications:processed:<TipoDoEvento>:<chave> <timestamp> NX EX 604800
@@ -182,13 +183,42 @@ SET fcg:notifications:processed:<TipoDoEvento>:<chave> <timestamp> NX EX 604800
 | **`SET NX`**, não `EXISTS` + `SET` | uma operação **atômica** no servidor. "Consultar depois gravar" tem janela de corrida: dois pods passam pelo teste e os dois enviam |
 | **TTL de 7 dias** | cobre retentativa (segundos), requeue (minutos) e reprocessamento manual da DLQ (horas/dias), sem o keyspace crescer para sempre |
 | **Tipo do evento na chave** | o mesmo id pode aparecer em eventos diferentes e precisa ser deduplicado de forma independente |
-| **Marcar ANTES de enviar** | *at-most-once*. Falha entre marcação e envio perde o e-mail; a alternativa perderia a garantia de unicidade. E-mail duplicado é visível para o cliente; boas-vindas perdido é recuperável. Mesmo comportamento do `notifications-api` |
+| **Marcar ANTES de enviar, com COMPENSAÇÃO** | marcar antes evita duplicar; e se o envio falhar, a marcação é **desfeita** (`UnmarkAsync`) para a reentrega poder tentar de novo. Sem a compensação a perda seria permanente e silenciosa: a reentrega veria a chave, sairia calada, o host daria ack, e o e-mail desapareceria **sem log de erro e sem ir para a dead-letter** |
 | **Rejeitado não consome a chave** | um `PaymentProcessedEvent` com status `Rejected` **não** marca o `OrderId`, senão a confirmação legítima de um reprocessamento posterior (rejeitado → aprovado) ficaria bloqueada para sempre |
+
+### ⚠️ A janela de 7 dias é um TETO, não um piso
+
+O Redis da plataforma é provisionado deliberadamente **como cache**, não como banco
+([`orchestration/k8s/12-infra-redis.yaml`](https://github.com/fcg-grupo-16/orchestration/blob/main/k8s/12-infra-redis.yaml)):
+`Deployment` sem `PersistentVolumeClaim`, `--save ""`, `--appendonly no` e
+`--maxmemory-policy allkeys-lru`. Duas consequências medidas:
+
+1. **Restart do pod apaga tudo.** Um restart do Redis zerou o keyspace inteiro, inclusive chaves de
+   idempotência ativas.
+2. **O LRU come justamente estas chaves.** Num container com as mesmas flags, 200 chaves de
+   idempotência com TTL de 7 dias, nunca mais lidas, foram para **2** depois de tráfego normal de
+   cache — 99% despejadas. Não é azar: a chave é **escrita uma vez e lida nunca** (a única leitura é
+   a duplicata rara), então é sempre o dado mais frio de uma instância compartilhada com os caches
+   quentes de `users-api` e `catalog-api` — exatamente o que `allkeys-lru` escolhe primeiro.
+
+**Na prática, a deduplicação é best-effort.** Se o pod do Redis reiniciar (reschedule, drain de nó,
+bump de imagem) ou houver pressão de memória entre o envio e um reprocessamento da dead-letter, **o
+e-mail pode ser duplicado** — o próprio caso que esta seção existe para evitar.
+
+> O comentário do manifesto do Redis justifica a ausência de persistência com *"todo dado é
+> reconstruível a partir do MongoDB"*. Para as chaves de idempotência isso é **falso**: elas não são
+> reconstruíveis de lugar nenhum. Rastreado em `orchestration#35`.
 
 ### ⚠️ Fail-CLOSED — ao contrário do cache dos outros serviços
 
 Se o Redis estiver fora, o store **lança**, a mensagem é reentregue e, esgotadas as tentativas, vai
-para a dead-letter. É o oposto do `RedisCacheService` de `users-api`/`catalog-api`, que é
+para a dead-letter. **O orçamento é curto: 5 tentativas em ~20 segundos** — limite fixo da extensão
+do RabbitMQ, já que o `host.json` não tem bloco `retry` (deprecado para este trigger). Isso é menos
+que um restart rotineiro do Redis, então indisponibilidade dele enche a DLQ rápido e reprocessá-la é
+procedimento esperado. Com `prefetchCount: 20`, até 20 mensagens em voo queimam as tentativas na
+mesma janela e vão juntas para a DLQ.
+
+É o oposto do `RedisCacheService` de `users-api`/`catalog-api`, que é
 fail-**open** de propósito.
 
 A diferença é o custo do erro: lá, cache fora significa consulta mais lenta; aqui, idempotência
