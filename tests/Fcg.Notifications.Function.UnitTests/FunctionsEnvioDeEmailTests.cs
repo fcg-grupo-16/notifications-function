@@ -1,5 +1,7 @@
 using Fcg.Notifications.Function.Email;
 using Fcg.Notifications.Function.Functions;
+using Fcg.Notifications.Function.Messaging;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Fcg.Notifications.Function.UnitTests;
@@ -201,6 +203,134 @@ public sealed class FunctionsEnvioDeEmailTests
 
         await NovaPaymentProcessed(sender).RunAsync(
             EnvelopeUserCreated("u-1", "Maria", "maria@fcg.com"), CancellationToken.None);
+
+        Assert.Empty(sender.Enviados);
+    }
+}
+
+/// <summary>
+/// Logger de teste que captura o que foi escrito, para verificar a política de sanitização.
+/// </summary>
+internal sealed class LoggerEspiao<T> : ILogger<T>
+{
+    public List<(LogLevel Nivel, string Mensagem)> Linhas { get; } = [];
+
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+    public bool IsEnabled(LogLevel logLevel) => true;
+
+    public void Log<TState>(
+        LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+        Func<TState, Exception?, string> formatter) =>
+        Linhas.Add((logLevel, formatter(state, exception)));
+}
+
+/// <summary>
+/// Testes do <see cref="LoggingEmailSender"/> — a ÚNICA implementação de <see cref="IEmailSender"/>
+/// que existe hoje, e que até aqui não tinha teste nenhum.
+/// </summary>
+public sealed class LoggingEmailSenderTests
+{
+    private static (LoggingEmailSender Sender, LoggerEspiao<LoggingEmailSender> Logger) Criar()
+    {
+        var logger = new LoggerEspiao<LoggingEmailSender>();
+        return (new LoggingEmailSender(logger), logger);
+    }
+
+    [Fact(DisplayName = "O endereço completo NÃO aparece no log de Information")]
+    public async Task SendAsync_NaoVazaEnderecoCompletoEmInformation()
+    {
+        // As Functions mascaram o e-mail antes de logar; entregar o endereço cru aqui anulava esse
+        // cuidado — as duas linhas saíam adjacentes no stdout, uma mascarada e outra não.
+        var (sender, logger) = Criar();
+
+        await sender.SendAsync(new EmailMessage("maria.silva@fcg.com", "Assunto", "Corpo"));
+
+        var information = logger.Linhas.Where(l => l.Nivel == LogLevel.Information).ToList();
+        Assert.NotEmpty(information);
+        Assert.All(information, l => Assert.DoesNotContain("maria.silva@fcg.com", l.Mensagem));
+        Assert.Contains(information, l => l.Mensagem.Contains("ma***@fcg.com"));
+    }
+
+    [Fact(DisplayName = "Corpo gigante é truncado — uma linha de log não pode ter 10 MB")]
+    public async Task SendAsync_CorpoGigante_EhTruncado()
+    {
+        var (sender, logger) = Criar();
+        var corpoEnorme = new string('x', 10_000_000);
+
+        await sender.SendAsync(new EmailMessage("a@b.com", "Assunto", corpoEnorme));
+
+        var linha = Assert.Single(logger.Linhas.Where(l => l.Nivel == LogLevel.Information));
+        Assert.True(linha.Mensagem.Length < 1_000,
+            $"a linha de log ficou com {linha.Mensagem.Length} caracteres");
+    }
+
+    [Fact(DisplayName = "O assunto continua íntegro no log (truncar não pode cegar a operação)")]
+    public async Task SendAsync_MantemOAssunto()
+    {
+        var (sender, logger) = Criar();
+
+        await sender.SendAsync(new EmailMessage("a@b.com", "Confirmação de compra", "Corpo"));
+
+        Assert.Contains(logger.Linhas, l => l.Mensagem.Contains("Confirmação de compra"));
+    }
+}
+
+/// <summary>
+/// Testes da barreira contra destinatário abusivo.
+/// </summary>
+public sealed class DestinatarioTests
+{
+    [Theory(DisplayName = "Destinatário com CR/LF é rejeitado (injeção de log hoje, de cabeçalho com SMTP)")]
+    [InlineData("vitima@fcg.com\r\nBcc: atacante@evil.com")]
+    [InlineData("vitima@fcg.com\nBcc: atacante@evil.com")]
+    [InlineData("vitima@fcg.com\r")]
+    [InlineData("\nvitima@fcg.com")]
+    public void DestinatarioEhAceitavel_ComQuebraDeLinha_Rejeita(string destinatario)
+    {
+        Assert.False(LogSanitizer.DestinatarioEhAceitavel(destinatario));
+    }
+
+    [Theory(DisplayName = "Destinatário vazio, nulo ou absurdamente longo é rejeitado")]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void DestinatarioEhAceitavel_VazioOuNulo_Rejeita(string? destinatario)
+    {
+        Assert.False(LogSanitizer.DestinatarioEhAceitavel(destinatario));
+    }
+
+    [Fact(DisplayName = "Destinatário acima de 320 caracteres é rejeitado, e exatamente 320 é aceito")]
+    public void DestinatarioEhAceitavel_RespeitaOLimiteDe320()
+    {
+        // 320 é o limite prático de um endereço de e-mail (64 local + @ + 255 domínio).
+        var noLimite = new string('a', 320 - "@fcg.com".Length) + "@fcg.com";
+        var acimaDoLimite = new string('a', 321 - "@fcg.com".Length) + "@fcg.com";
+
+        Assert.Equal(320, noLimite.Length);
+        Assert.True(LogSanitizer.DestinatarioEhAceitavel(noLimite));
+        Assert.False(LogSanitizer.DestinatarioEhAceitavel(acimaDoLimite));
+    }
+
+    [Theory(DisplayName = "Endereço normal continua sendo aceito")]
+    [InlineData("maria@fcg.com")]
+    [InlineData("maria.silva+tag@sub.dominio.com.br")]
+    public void DestinatarioEhAceitavel_EnderecoNormal_Aceita(string destinatario)
+    {
+        Assert.True(LogSanitizer.DestinatarioEhAceitavel(destinatario));
+    }
+
+    [Fact(DisplayName = "A Function barra CRLF no e-mail antes de chegar ao sender")]
+    public async Task UserCreated_EmailComCrlf_NaoEnvia()
+    {
+        var sender = new EmailSenderEspiao();
+        const string corpo =
+            "{\"messageType\":[\"urn:message:Fcg.Contracts.Events:UserCreatedEvent\"]," +
+            "\"message\":{\"userId\":\"u-1\",\"nome\":\"Maria\"," +
+            "\"email\":\"vitima@fcg.com\\r\\nBcc: atacante@evil.com\"}}";
+
+        await new UserCreatedFunction(NullLogger<UserCreatedFunction>.Instance, sender)
+            .RunAsync(corpo, CancellationToken.None);
 
         Assert.Empty(sender.Enviados);
     }

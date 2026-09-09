@@ -54,13 +54,20 @@ public sealed class EmailTemplatesTests
         Assert.Contains(orderId.ToString(), email.Body);
     }
 
-    [Fact(DisplayName = "PurchaseConfirmation formata o preço em pt-BR (pega regressão de InvariantGlobalization)")]
+    [Fact(DisplayName = "PurchaseConfirmation formata o preço na convenção pt-BR")]
     public void PurchaseConfirmation_FormataPrecoEmPtBr()
     {
-        // EmailTemplates usa `new CultureInfo("pt-BR")`. Imagens de container .NET podem rodar em
-        // invariant globalization, onde essa cultura não existe — e aí o preço sai como "¤99.90" ou
-        // a chamada lança. É por isso que o csproj declara InvariantGlobalization=false, e este
-        // teste é o que impede a regressão passar despercebida no CI ou no Dockerfile da #5.
+        // ⚠️ O QUE ESTE TESTE FAZ E O QUE ELE NÃO FAZ.
+        //
+        // Ele valida o FORMATO — separador de milhar ponto, decimal vírgula, símbolo R$ — e pega
+        // regressão em EmailTemplates (alguém trocar a cultura, o especificador ou o campo).
+        //
+        // Ele NÃO trava a configuração de globalização do runtime, por mais que pareça. O host de
+        // teste roda com ICU disponível independentemente do que o csproj diga; verificado apagando
+        // `InvariantGlobalization=false` e vendo os 75 testes continuarem verdes. A propriedade
+        // agora vive no Directory.Build.props (vale para todos os projetos), mas a garantia que
+        // importa — a imagem de container ter ICU — só pode ser verificada com um smoke test da
+        // IMAGEM, que é escopo da issue #5. Sem ICU o processo nem inicia.
         var evento = new PaymentProcessedEvent
         {
             OrderId = Guid.NewGuid(),

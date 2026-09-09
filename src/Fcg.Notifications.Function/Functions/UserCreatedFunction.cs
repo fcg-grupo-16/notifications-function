@@ -72,10 +72,10 @@ public sealed class UserCreatedFunction
         // SOBRESCREVE o default com null quando o JSON traz `"email": null` — então a garantia do
         // tipo não vale para dado que veio da rede. Sem esta checagem, a issue #2 enviaria e-mail
         // para destinatário nulo ou estouraria NullReferenceException dentro do IEmailSender.
-        if (string.IsNullOrWhiteSpace(evento.UserId) || string.IsNullOrWhiteSpace(evento.Email))
+        if (string.IsNullOrWhiteSpace(evento.UserId) || !LogSanitizer.DestinatarioEhAceitavel(evento.Email))
         {
             _logger.LogWarning(
-                "UserCreatedEvent sem campo obrigatório (UserId ou Email); descartado. ConversationId={ConversationId}",
+                "UserCreatedEvent com UserId ausente ou destinatário inaceitável; descartado. ConversationId={ConversationId}",
                 envelope.ConversationId);
             return;
         }

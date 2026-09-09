@@ -1,0 +1,20 @@
+<Project>
+
+  <PropertyGroup>
+    <!-- Vale para TODOS os projetos do repositório, inclusive o de teste.
+         Declarar só no csproj do src não bastava: a propriedade não atravessa para o
+         runtimeconfig.json do host de teste, então apagá-la de lá não quebrava nenhum teste — a
+         "rede de segurança" era imaginária.
+
+         O que ela significa na prática: o processo EXIGE ICU. EmailTemplates formata o preço com
+         CultureInfo("pt-BR"), e sem dados de globalização o .NET não consegue produzir "R$ 1.234,56".
+
+         ⚠️ CONSEQUÊNCIA PARA O DOCKERFILE (issue #5): com esta propriedade, uma imagem base SEM ICU
+         faz o processo RECUSAR INICIAR ("Couldn't find a valid ICU package installed on the
+         system") — falha de startup, não de formatação. A imagem oficial de Azure Functions traz
+         ICU; se alguém trocar por alpine ou chiseled, precisa instalar `icu-libs`. Nenhum teste
+         unitário pega isso: só um smoke test da imagem, que é escopo da #5. -->
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+
+</Project>

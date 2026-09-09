@@ -12,10 +12,6 @@
     <Nullable>enable</Nullable>
     <RootNamespace>Fcg.Notifications.Function</RootNamespace>
     <AssemblyName>Fcg.Notifications.Function</AssemblyName>
-    <!-- EmailTemplates (issue #2) usa CultureInfo("pt-BR") para formatar o preço. Imagens de
-         container .NET podem rodar em invariant globalization, onde criar essa cultura falha.
-         Declarado desde já para a decisão não se perder entre issues. -->
-    <InvariantGlobalization>false</InvariantGlobalization>
     <!-- O default do SDK 8 é `direct`: vulnerabilidade em dependência TRANSITIVA não geraria aviso
          nenhum, e o gate do CI passaria verde. A maior parte da nossa árvore é transitiva (o host
          de Functions e o cliente RabbitMQ vêm por baixo da extensão), então `all` não é opcional. -->

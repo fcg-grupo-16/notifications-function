@@ -108,6 +108,57 @@ Function 'Functions.UserCreatedFunction' failed indexing and will be disabled.
 O sintoma é traiçoeiro: o `func start` **lista** as duas funções em `Functions:` e parece saudável,
 mas nenhuma consome nada. Usamos `mensagem`.
 
+## Envio de e-mail
+
+O envio é **plugável**: as Functions dependem só de `IEmailSender`, e a implementação atual
+(`LoggingEmailSender`) apenas registra a mensagem no log — simulação, sem provedor externo, igual
+ao `notifications-api`. Trocar por SMTP/HTTP real é registrar outra implementação no DI, sem tocar
+nas Functions.
+
+`EmailTemplates` renderiza as mensagens em pt-BR e **guarda a regra de negócio**:
+`PurchaseConfirmation` devolve `null` quando o pagamento não foi aprovado, e a Function apenas
+respeita esse `null` — a decisão de "manda ou não manda" mora num lugar só.
+
+### ⚠️ Requisito de globalização (ICU) — a #5 precisa respeitar isto no Dockerfile
+
+`EmailTemplates` formata o preço com `CultureInfo("pt-BR")` (`R$ 1.234,56`), e o
+`Directory.Build.props` declara `InvariantGlobalization=false` para todos os projetos.
+
+**Consequência:** o processo **exige ICU**. Numa imagem base sem ICU (alpine sem `icu-libs`,
+chiseled), o .NET **recusa iniciar** — `Couldn't find a valid ICU package installed on the
+system`. É falha de **startup**, não de formatação, e some do log num container que reinicia em
+loop.
+
+A imagem oficial de Azure Functions traz ICU. Se alguém trocar a base, instale `icu-libs`.
+
+> **Nenhum teste unitário pega isso.** O teste `PurchaseConfirmation_FormataPrecoEmPtBr` valida o
+> **formato** (separador de milhar, decimal, símbolo) — verificado que ele continua verde mesmo
+> apagando a propriedade do csproj, porque o host de teste sempre roda com ICU disponível. A única
+> verificação real é um **smoke test da imagem**, escopo da issue #5.
+
+### Sanitização de log
+
+Tudo que sai no log vem de mensagem publicada por outro sistema — conteúdo **não confiável**, com
+dado pessoal. Por isso:
+
+| | |
+|---|---|
+| **E-mail** | mascarado (`ma***@fcg.com`) em `Information`; completo só em `Debug` |
+| **Corpo** | truncado em 500 caracteres, sem partir par surrogate |
+| **Destinatário** | rejeitado se tiver `CR`/`LF` ou passar de 320 caracteres |
+
+O CR/LF importa: `IsNullOrWhiteSpace` não barra quebra de linha **interna**, e um
+`vitima@fcg.com\r\nBcc: atacante@evil.com` é injeção de log hoje e injeção de **cabeçalho** no dia
+em que houver SMTP de verdade.
+
+### Limitações conhecidas
+
+1. **A confirmação de compra é endereçada ao `UserId`, não a um e-mail.** Comportamento herdado do
+   `notifications-api`: `PaymentProcessedEvent` não carrega o endereço. Corrigir exige enriquecer o
+   contrato do evento (compartilhado com `payments-api` e `catalog-api`) ou consultar o `users-api`.
+2. **Sem a issue #3 não há garantia de "enviado uma vez só".** Uma reentrega da mesma mensagem hoje
+   gera e-mail duplicado.
+
 ## Configuração
 
 | App setting | Origem no k8s | Exemplo |
