@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- net8.0 e NÃO net10.0, ao contrário do resto da plataforma. O suporte a .NET 10 no host de
+         Azure Functions ainda é preview e tem problemas conhecidos de carregamento de assembly no
+         Core Tools rodando localmente. Esta é a peça mais crítica da entrega e precisa funcionar na
+         gravação do vídeo, então ficamos no alvo estável do host. Ver README. -->
+    <TargetFramework>net8.0</TargetFramework>
+    <AzureFunctionsVersion>v4</AzureFunctionsVersion>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Fcg.Notifications.Function</RootNamespace>
+    <AssemblyName>Fcg.Notifications.Function</AssemblyName>
+    <!-- EmailTemplates (issue #2) usa CultureInfo("pt-BR") para formatar o preço. Imagens de
+         container .NET podem rodar em invariant globalization, onde criar essa cultura falha.
+         Declarado desde já para a decisão não se perder entre issues. -->
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Versões escolhidas pelo template do `func init` (mutuamente compatíveis), não por palpite. -->
+    <PackageReference Include="Microsoft.Azure.Functions.Worker" Version="2.52.0" />
+    <PackageReference Include="Microsoft.Azure.Functions.Worker.Sdk" Version="2.0.7" />
+    <!-- O binding que aciona a função direto pelas filas do RabbitMQ que a plataforma já usa —
+         é o que permite migrar para serverless sem tocar no backbone de mensageria. -->
+    <PackageReference Include="Microsoft.Azure.Functions.Worker.Extensions.RabbitMQ" Version="2.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="host.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="local.settings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Never</CopyToPublishDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

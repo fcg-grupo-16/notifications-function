@@ -7,10 +7,10 @@ container rodando 24/7 para uma tarefa esporádica.
 
 > **Grupo 16** — org GitHub [`fcg-grupo-16`](https://github.com/fcg-grupo-16)
 
-> ⚠️ **Repositório recém-criado — a implementação ainda não começou.**
-> O trabalho está quebrado nas issues [#1 a #6](https://github.com/fcg-grupo-16/notifications-function/issues),
-> na ordem. Comece pela **[#1](https://github.com/fcg-grupo-16/notifications-function/issues/1)** e
-> substitua este README pelo definitivo conforme as issues pedem.
+> **Estado atual:** a issue #1 (bootstrap: trigger + parser do envelope + testes + CI) está pronta.
+> Faltam [#2 a #6](https://github.com/fcg-grupo-16/notifications-function/issues): envio de e-mail,
+> idempotência em Redis, histórico em MongoDB, empacotamento/IaC e observabilidade. Hoje as funções
+> **recebem e desembrulham** o evento e o registram no log — ainda não enviam e-mail.
 
 ## O que esta função faz
 
@@ -74,6 +74,36 @@ O corpo da mensagem **não** é o evento cru: é o **envelope do MassTransit**
 
 Desembalar isso é responsabilidade da função (`Messaging/MassTransitEnvelopeParser`).
 
+### Duas armadilhas do formato — as duas descobertas rodando o fluxo real
+
+**1. O corpo do evento vem em `camelCase`** (`userId`, `nome`, `email`), enquanto os records de
+`Fcg.Contracts.Events` são `PascalCase`. Sem `PropertyNameCaseInsensitive` a desserialização **não
+falha**: devolve o objeto com todas as propriedades nulas, e a função "processa com sucesso"
+mandando e-mail para destinatário vazio.
+
+**2. O MassTransit serializa `decimal` como STRING.** O envelope real de `PaymentProcessedEvent`
+traz `"price": "29.90"` — com aspas. O `System.Text.Json` rejeita string para `decimal` por padrão
+e lança `JsonException`, o que jogava a mensagem no caminho de *poison message* e fazia a
+confirmação de compra **nunca ser enviada**, em silêncio, com o host registrando execução
+bem-sucedida. Resolvido com `NumberHandling = JsonNumberHandling.AllowReadingFromString`.
+
+Ambas têm teste dedicado usando **envelopes capturados do broker**, não inventados — o teste que
+usava `49.90` sem aspas passava e escondia o bug nº 2.
+
+### Nome do parâmetro do trigger
+
+O parâmetro do `[RabbitMQTrigger]` **não pode se chamar `body`** — colide com o binding data do
+próprio trigger e o host recusa a função no startup:
+
+```
+Microsoft.Azure.WebJobs.Host: Error indexing method 'Functions.UserCreatedFunction'.
+Can't bind parameter 'body' to type 'System.String'.
+Function 'Functions.UserCreatedFunction' failed indexing and will be disabled.
+```
+
+O sintoma é traiçoeiro: o `func start` **lista** as duas funções em `Functions:` e parece saudável,
+mas nenhuma consome nada. Usamos `mensagem`.
+
 ## Configuração
 
 | App setting | Origem no k8s | Exemplo |
@@ -93,15 +123,42 @@ Para dev local, copie `local.settings.example.json` para `local.settings.json` (
 
 ## Rodar localmente
 
+**Pré-requisito:** Azure Functions Core Tools v4. O pacote npm quebra no Node 26
+(`TypeError: chalk.red is not a function` no instalador), então baixe o binário oficial do
+[GitHub releases](https://github.com/Azure/azure-functions-core-tools/releases) e extraia num
+diretório do seu PATH.
+
 ```bash
 # 1) Infra (a partir do repo orchestration, clonado como irmão deste)
 cd ../orchestration && docker compose up -d rabbitmq mongodb redis users-api catalog-api payments-api
+```
 
-# 2) A fila precisa existir ANTES (o trigger não a cria)
+```bash
+# 2) A fila precisa existir ANTES — o trigger não a cria (ver orchestration#28)
 docker compose exec rabbitmq rabbitmqctl list_queues name | grep notifications
+```
 
-# 3) A função
-cd ../notifications-function/src/Fcg.Notifications.Function && func start
+```bash
+# 3) ⚠️ Pare o notifications-api enquanto testa: os dois consomem a MESMA fila e viram
+#    competing consumers, entregando cada mensagem a um deles de forma imprevisível.
+docker compose stop notifications-api
+```
+
+```bash
+# 4) A função
+cd ../notifications-function/src/Fcg.Notifications.Function
+cp local.settings.example.json local.settings.json   # gitignored
+func start
+```
+
+No startup as duas funções devem aparecer como `rabbitMQTrigger`, e
+`rabbitmqctl list_queues name consumers` deve mostrar **1 consumidor** em cada fila. Se as funções
+aparecem listadas mas os consumidores continuam em 0, procure `failed indexing` no log.
+
+### Testes
+
+```bash
+dotnet test
 ```
 
 ## Repositórios da plataforma
