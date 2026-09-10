@@ -1,5 +1,6 @@
 using Fcg.Contracts.Events;
 using Fcg.Notifications.Function.Email;
+using Fcg.Notifications.Function.Idempotency;
 using Fcg.Notifications.Function.Messaging;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
@@ -18,11 +19,16 @@ public sealed class UserCreatedFunction
 
     private readonly ILogger<UserCreatedFunction> _logger;
     private readonly IEmailSender _emailSender;
+    private readonly IProcessedMessageStore _store;
 
-    public UserCreatedFunction(ILogger<UserCreatedFunction> logger, IEmailSender emailSender)
+    public UserCreatedFunction(
+        ILogger<UserCreatedFunction> logger,
+        IEmailSender emailSender,
+        IProcessedMessageStore store)
     {
         _logger = logger;
         _emailSender = emailSender;
+        _store = store;
     }
 
     /// <summary>
@@ -72,7 +78,8 @@ public sealed class UserCreatedFunction
         // SOBRESCREVE o default com null quando o JSON traz `"email": null` — então a garantia do
         // tipo não vale para dado que veio da rede. Sem esta checagem, a issue #2 enviaria e-mail
         // para destinatário nulo ou estouraria NullReferenceException dentro do IEmailSender.
-        if (string.IsNullOrWhiteSpace(evento.UserId) || !LogSanitizer.DestinatarioEhAceitavel(evento.Email))
+        if (!LogSanitizer.IdentificadorEhAceitavel(evento.UserId)
+            || !LogSanitizer.DestinatarioEhAceitavel(evento.Email))
         {
             _logger.LogWarning(
                 "UserCreatedEvent com UserId ausente ou destinatário inaceitável; descartado. ConversationId={ConversationId}",
@@ -84,10 +91,38 @@ public sealed class UserCreatedFunction
             "UserCreatedEvent recebido. UserId={UserId} Email={Email} ConversationId={ConversationId}",
             evento.UserId, LogSanitizer.MascararEmail(evento.Email), envelope.ConversationId);
 
-        // TODO(#3): o guard de idempotência entra AQUI, antes do envio — marcar depois de enviar
-        //           faria uma falha entre envio e marcação reenviar o e-mail na reentrega.
-        var email = EmailTemplates.Welcome(evento);
-        await _emailSender.SendAsync(email, cancellationToken);
+        // IDEMPOTÊNCIA ANTES DO ENVIO: "reserva" a chave e só então manda o e-mail.
+        //
+        // O trade-off é consciente e é o mesmo que o notifications-api já fazia. Marcar ANTES
+        // significa que uma falha ENTRE a marcação e o envio perde o e-mail (a reentrega vê a
+        // chave e não reenvia). Marcar DEPOIS trocaria isso por "pode duplicar". Escolhemos
+        // at-most-once porque e-mail duplicado é visível e irritante para o cliente, enquanto
+        // perder um e-mail de boas-vindas é recuperável — e porque este caminho é o mesmo do
+        // serviço que estamos substituindo, então a migração não muda comportamento.
+        var inedito = await _store.TryMarkAsProcessedAsync(
+            nameof(UserCreatedEvent), evento.UserId, cancellationToken);
+
+        if (!inedito)
+        {
+            // O store já registrou o motivo no log.
+            return;
+        }
+
+        // COMPENSAÇÃO: se o envio falhar, a marcação é desfeita para a reentrega poder tentar de
+        // novo. Sem isto, marcar-antes-de-enviar tornaria a perda PERMANENTE — a reentrega veria a
+        // chave, sairia calada, o host daria ack, e o e-mail desapareceria sem log de erro e sem ir
+        // para a dead-letter. É também o que mantém verdadeiro o contrato de IEmailSender ("falha
+        // transitória deve lançar, a reentrega resolve").
+        try
+        {
+            var email = EmailTemplates.Welcome(evento);
+            await _emailSender.SendAsync(email, cancellationToken);
+        }
+        catch
+        {
+            await _store.UnmarkAsync(nameof(UserCreatedEvent), evento.UserId, cancellationToken);
+            throw;
+        }
 
         // TODO(#4): persistir o histórico em notificationsdb (best-effort, depois do envio).
     }

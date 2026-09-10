@@ -1,5 +1,6 @@
 using Fcg.Contracts.Events;
 using Fcg.Notifications.Function.Email;
+using Fcg.Notifications.Function.Idempotency;
 using Fcg.Notifications.Function.Messaging;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
@@ -16,11 +17,16 @@ public sealed class PaymentProcessedFunction
 
     private readonly ILogger<PaymentProcessedFunction> _logger;
     private readonly IEmailSender _emailSender;
+    private readonly IProcessedMessageStore _store;
 
-    public PaymentProcessedFunction(ILogger<PaymentProcessedFunction> logger, IEmailSender emailSender)
+    public PaymentProcessedFunction(
+        ILogger<PaymentProcessedFunction> logger,
+        IEmailSender emailSender,
+        IProcessedMessageStore store)
     {
         _logger = logger;
         _emailSender = emailSender;
+        _store = store;
     }
 
     /// <inheritdoc cref="UserCreatedFunction.RunAsync"/>
@@ -43,7 +49,7 @@ public sealed class PaymentProcessedFunction
         var evento = envelope.Message!;
 
         // Ver UserCreatedFunction: o contrato declara não-anulável, mas o JSON pode trazer null.
-        if (evento.OrderId == Guid.Empty || string.IsNullOrWhiteSpace(evento.UserId))
+        if (evento.OrderId == Guid.Empty || !LogSanitizer.IdentificadorEhAceitavel(evento.UserId))
         {
             _logger.LogWarning(
                 "PaymentProcessedEvent sem campo obrigatório (OrderId ou UserId); descartado. ConversationId={ConversationId}",
@@ -69,10 +75,33 @@ public sealed class PaymentProcessedFunction
             "PaymentProcessedEvent aprovado. OrderId={OrderId} UserId={UserId} GameId={GameId} ConversationId={ConversationId}",
             evento.OrderId, evento.UserId, evento.GameId, envelope.ConversationId);
 
-        // TODO(#3): idempotência por OrderId AQUI — e a chave só pode ser consumida neste caminho
-        //           aprovado: um evento "Rejected" que gastasse a chave bloquearia a confirmação
-        //           legítima de um reprocessamento posterior.
-        await _emailSender.SendAsync(confirmacao, cancellationToken);
+        // A CHAVE SÓ É CONSUMIDA NO CAMINHO APROVADO — repare que este bloco está DEPOIS do
+        // `confirmacao is null`, não antes. Se um evento "Rejected" gastasse a chave do OrderId, a
+        // confirmação LEGÍTIMA de um reprocessamento posterior do mesmo pedido (rejeitado e depois
+        // aprovado) seria bloqueada para sempre. Detalhe sutil, portado 1:1 do
+        // PaymentProcessedConsumer — não mova este guard para cima.
+        var inedito = await _store.TryMarkAsProcessedAsync(
+            nameof(PaymentProcessedEvent), evento.OrderId.ToString(), cancellationToken);
+
+        if (!inedito)
+        {
+            return;
+        }
+
+        // COMPENSAÇÃO: se o envio falhar, a marcação é desfeita para a reentrega poder tentar de
+        // novo. Sem isto, marcar-antes-de-enviar tornaria a perda PERMANENTE — a reentrega veria a
+        // chave, sairia calada, o host daria ack, e o e-mail desapareceria sem log de erro e sem ir
+        // para a dead-letter. É também o que mantém verdadeiro o contrato de IEmailSender ("falha
+        // transitória deve lançar, a reentrega resolve").
+        try
+        {
+            await _emailSender.SendAsync(confirmacao, cancellationToken);
+        }
+        catch
+        {
+            await _store.UnmarkAsync(nameof(PaymentProcessedEvent), evento.OrderId.ToString(), cancellationToken);
+            throw;
+        }
 
         // TODO(#4): persistir o histórico.
     }

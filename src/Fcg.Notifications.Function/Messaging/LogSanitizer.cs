@@ -32,6 +32,21 @@ public static class LogSanitizer
     ///   </item>
     /// </list>
     /// </remarks>
+    /// <summary>
+    /// Indica se o identificador é aceitável para virar chave de idempotência no Redis.
+    /// </summary>
+    /// <remarks>
+    /// O Redis aceita chave de até 512 MB, e o <c>UserId</c>/<c>OrderId</c> vem de um campo que
+    /// qualquer publisher controla. Medido: um id de 200.000 caracteres é aceito sem reclamação.
+    /// Como o Redis é COMPARTILHADO com os caches de <c>users-api</c> e <c>catalog-api</c> e tem
+    /// teto de 256 MB com evicção LRU, um id absurdo acelera o despejo de chaves alheias e degrada
+    /// o cache de toda a plataforma. Mesmo raciocínio do limite aplicado ao destinatário de e-mail.
+    /// </remarks>
+    public static bool IdentificadorEhAceitavel(string? identificador) =>
+        !string.IsNullOrWhiteSpace(identificador)
+        && identificador.Length <= 128
+        && identificador.AsSpan().IndexOfAny('\r', '\n') < 0;
+
     public static bool DestinatarioEhAceitavel(string? destinatario) =>
         !string.IsNullOrWhiteSpace(destinatario)
         && destinatario.Length <= 320                      // limite prático de endereço de e-mail

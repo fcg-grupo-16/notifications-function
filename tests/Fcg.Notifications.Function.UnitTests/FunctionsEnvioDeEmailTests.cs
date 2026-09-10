@@ -1,5 +1,6 @@
 using Fcg.Notifications.Function.Email;
 using Fcg.Notifications.Function.Functions;
+using Fcg.Notifications.Function.Idempotency;
 using Fcg.Notifications.Function.Messaging;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -33,6 +34,47 @@ internal sealed class EmailSenderEspiao : IEmailSender
     }
 }
 
+
+/// <summary>
+/// Store de idempotência em memória, só para teste. Registra as chaves marcadas e permite simular
+/// "já processado" e falha do Redis.
+/// </summary>
+internal sealed class StoreEspiao : IProcessedMessageStore
+{
+    private readonly Exception? _erroParaLancar;
+
+    public StoreEspiao(Exception? erroParaLancar = null) => _erroParaLancar = erroParaLancar;
+
+    /// <summary>
+    /// Chaves atualmente MARCADAS — fiel ao store real: uma chamada que reconhece duplicata não
+    /// acrescenta nada, e <see cref="UnmarkAsync"/> remove. (Antes esta lista registrava
+    /// "chamadas" e não "marcações", o que daria falso positivo num teste de "marcada uma vez".)
+    /// </summary>
+    public HashSet<string> Marcadas { get; } = [];
+
+    /// <summary>Quantas vezes a compensação foi acionada.</summary>
+    public int Compensacoes { get; private set; }
+
+    public Task<bool> TryMarkAsProcessedAsync(string messageType, string naturalKey, CancellationToken ct = default)
+    {
+        if (_erroParaLancar is not null)
+        {
+            throw _erroParaLancar;
+        }
+
+        return Task.FromResult(Marcadas.Add(Chave(messageType, naturalKey)));
+    }
+
+    public Task UnmarkAsync(string messageType, string naturalKey, CancellationToken ct = default)
+    {
+        Marcadas.Remove(Chave(messageType, naturalKey));
+        Compensacoes++;
+        return Task.CompletedTask;
+    }
+
+    private static string Chave(string messageType, string naturalKey) => $"{messageType}:{naturalKey}";
+}
+
 /// <summary>
 /// Testes das Functions em si — o comportamento observável de ponta a ponta dentro do processo:
 /// dado um corpo de mensagem, sai (ou não sai) e-mail.
@@ -54,11 +96,13 @@ public sealed class FunctionsEnvioDeEmailTests
         + "\"message\":{\"orderId\":\"3f2504e0-4f89-11d3-9a0c-0305e82c3301\",\"userId\":\"u-1\","
         + "\"gameId\":\"game-42\",\"price\":" + price + ",\"status\":\"" + status + "\"}}";
 
-    private static UserCreatedFunction NovaUserCreated(EmailSenderEspiao sender) =>
-        new(NullLogger<UserCreatedFunction>.Instance, sender);
+    private static UserCreatedFunction NovaUserCreated(
+        EmailSenderEspiao sender, StoreEspiao? store = null) =>
+        new(NullLogger<UserCreatedFunction>.Instance, sender, store ?? new StoreEspiao());
 
-    private static PaymentProcessedFunction NovaPaymentProcessed(EmailSenderEspiao sender) =>
-        new(NullLogger<PaymentProcessedFunction>.Instance, sender);
+    private static PaymentProcessedFunction NovaPaymentProcessed(
+        EmailSenderEspiao sender, StoreEspiao? store = null) =>
+        new(NullLogger<PaymentProcessedFunction>.Instance, sender, store ?? new StoreEspiao());
 
     // ---------------------------------------------------------------- cadastro
 
@@ -260,7 +304,7 @@ public sealed class LoggingEmailSenderTests
 
         await sender.SendAsync(new EmailMessage("a@b.com", "Assunto", corpoEnorme));
 
-        var linha = Assert.Single(logger.Linhas.Where(l => l.Nivel == LogLevel.Information));
+        var linha = Assert.Single(logger.Linhas, l => l.Nivel == LogLevel.Information);
         Assert.True(linha.Mensagem.Length < 1_000,
             $"a linha de log ficou com {linha.Mensagem.Length} caracteres");
     }
@@ -329,7 +373,7 @@ public sealed class DestinatarioTests
             "\"message\":{\"userId\":\"u-1\",\"nome\":\"Maria\"," +
             "\"email\":\"vitima@fcg.com\\r\\nBcc: atacante@evil.com\"}}";
 
-        await new UserCreatedFunction(NullLogger<UserCreatedFunction>.Instance, sender)
+        await new UserCreatedFunction(NullLogger<UserCreatedFunction>.Instance, sender, new StoreEspiao())
             .RunAsync(corpo, CancellationToken.None);
 
         Assert.Empty(sender.Enviados);
