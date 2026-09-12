@@ -1,0 +1,47 @@
+# Deployment da notifications-function. O ScaledObject do KEDA (scale-to-zero) fica no repo
+# orchestration, que é o dono da escala — ver orchestration#29.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notifications-function
+  namespace: fcg
+  labels:
+    app: notifications-function
+    app.kubernetes.io/part-of: fiap-cloud-games
+spec:
+  # Sem `replicas`: quem controla a contagem é o KEDA. Declarar aqui faria cada `kubectl apply`
+  # sobrescrever o scale-to-zero.
+  selector:
+    matchLabels:
+      app: notifications-function
+  template:
+    metadata:
+      labels:
+        app: notifications-function
+      annotations:
+        # Sem scrape: com scale-to-zero o pod vive segundos, incompatível com o pull do Prometheus.
+        prometheus.io/scrape: "false"
+    spec:
+      # Sem initContainer de espera: o KEDA só sobe o pod quando já há mensagem na fila, ou seja,
+      # com o broker no ar.
+      containers:
+        - name: notifications-function
+          image: notifications-function:local
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: notifications-function-config
+            # SealedSecret do orchestration: RabbitMqConnection, Redis__ConnectionString,
+            # MongoDbSettings__ConnectionString.
+            - secretRef:
+                name: notifications-function-secret
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              # Host de Functions + isolated worker: dois processos .NET no mesmo container.
+              cpu: 500m
+              memory: 640Mi
+          # Sem liveness/readiness HTTP: a função é acionada por fila e o host não expõe endpoint de
+          # saúde. Uma probe HTTP falharia e reiniciaria o pod em loop.
