@@ -257,6 +257,10 @@ ela subisse, o host retentaria a mensagem, a retentativa seria barrada pela idem
 mensagem terminaria na dead-letter por um erro de auditoria. Pagamento não aprovado não gera e-mail
 e, como na Fase 2, não gera registro.
 
+**Timeout de 3 s no cliente do Mongo** (`MongoClientSettingsFactory`). Com o default do driver (30 s
+de *server selection*), o Mongo fora do ar segurava **cada mensagem por 60 s** — um timeout na criação
+do índice e outro no insert. Medido no container: de `Duration=60292ms` para `Duration=6342ms`.
+
 **Índice criado uma vez por processo, preguiçosamente**, na primeira gravação — e não no startup,
 como no `notifications-api`: com KEDA o processo sobe e desce o tempo todo, e criar no startup
 somaria uma ida ao Mongo a todo cold start.
