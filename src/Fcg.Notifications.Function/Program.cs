@@ -60,7 +60,8 @@ var mongoConnectionString =
 
 var mongoDatabaseName = builder.Configuration["MongoDbSettings:DatabaseName"] ?? "notificationsdb";
 
-builder.Services.AddSingleton<IMongoClient>(_ => new MongoClient(mongoConnectionString));
+builder.Services.AddSingleton<IMongoClient>(_ =>
+    new MongoClient(MongoClientSettingsFactory.Criar(mongoConnectionString)));
 builder.Services.AddSingleton(sp => sp.GetRequiredService<IMongoClient>().GetDatabase(mongoDatabaseName));
 builder.Services.AddSingleton<INotificationHistoryStore, MongoNotificationHistoryStore>();
 // TODO(#6): OpenTelemetry (traces OTLP) e log estruturado em JSON.
