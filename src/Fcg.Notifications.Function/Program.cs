@@ -1,16 +1,18 @@
 using Fcg.Notifications.Function.Email;
 using Fcg.Notifications.Function.Idempotency;
+using Fcg.Notifications.Function.Persistence;
 using Microsoft.Azure.Functions.Worker.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using MongoDB.Driver;
 using StackExchange.Redis;
 
 var builder = FunctionsApplication.CreateBuilder(args);
 
 // SEM ConfigureFunctionsWebApplication(): esse método é a integração com ASP.NET Core e exige o
-// pacote ...Extensions.Http.AspNetCore. Esta função é acionada por FILA, não por HTTP, então o
-// pacote seria peso morto. A issue #4, se optar por expor o histórico via HttpTrigger, adiciona
-// o pacote e a chamada junto.
+// pacote ...Extensions.Http.AspNetCore. O HttpTrigger da consulta de auditoria (#4) usa
+// HttpRequestData/HttpResponseData, o modelo nativo do isolated worker, que precisa só do
+// ...Extensions.Http.
 
 // Envio de e-mail PLUGÁVEL: hoje um sender que apenas registra no log (simulação, sem provedor
 // externo), trocável por SMTP/HTTP real via DI sem tocar nas Functions, que dependem só da
@@ -48,7 +50,19 @@ redisOptions.SyncTimeout = 3000;
 // réplica que sobe do zero. Relevante para o scale-to-zero da #5/orchestration#29.
 builder.Services.AddSingleton<IConnectionMultiplexer>(_ => ConnectionMultiplexer.Connect(redisOptions));
 builder.Services.AddSingleton<IProcessedMessageStore, RedisProcessedMessageStore>();
-// TODO(#4): MongoDB (notificationsdb) para o histórico de notificações.
+
+// MongoDB (notificationsdb) — histórico das notificações. MESMO database e MESMA collection do
+// notifications-api, para os registros da Fase 2 continuarem legíveis. Ao contrário do Redis, aqui há
+// fallback em vez de erro fatal: o histórico é auditoria (best-effort), não garantia.
+var mongoConnectionString =
+    builder.Configuration["MongoDbSettings:ConnectionString"]
+    ?? "mongodb://localhost:27017/?replicaSet=rs0";
+
+var mongoDatabaseName = builder.Configuration["MongoDbSettings:DatabaseName"] ?? "notificationsdb";
+
+builder.Services.AddSingleton<IMongoClient>(_ => new MongoClient(mongoConnectionString));
+builder.Services.AddSingleton(sp => sp.GetRequiredService<IMongoClient>().GetDatabase(mongoDatabaseName));
+builder.Services.AddSingleton<INotificationHistoryStore, MongoNotificationHistoryStore>();
 // TODO(#6): OpenTelemetry (traces OTLP) e log estruturado em JSON.
 
 builder.Build().Run();

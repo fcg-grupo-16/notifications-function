@@ -233,7 +233,7 @@ public sealed class FunctionsIdempotenciaTests
     {
         var sender = new EmailSenderEspiao();
         var store = new StoreEspiao();
-        var funcao = new UserCreatedFunction(NullLogger<UserCreatedFunction>.Instance, sender, store);
+        var funcao = new UserCreatedFunction(NullLogger<UserCreatedFunction>.Instance, sender, store, new HistoricoEspiao());
 
         await funcao.RunAsync(EnvelopeUserCreated("u-1"), CancellationToken.None);
         await funcao.RunAsync(EnvelopeUserCreated("u-1"), CancellationToken.None);
@@ -253,7 +253,7 @@ public sealed class FunctionsIdempotenciaTests
         var store = new StoreEspiao();
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            new UserCreatedFunction(NullLogger<UserCreatedFunction>.Instance, senderQueFalha, store)
+            new UserCreatedFunction(NullLogger<UserCreatedFunction>.Instance, senderQueFalha, store, new HistoricoEspiao())
                 .RunAsync(EnvelopeUserCreated("u-1"), CancellationToken.None));
 
         Assert.Equal(1, store.Compensacoes);
@@ -261,7 +261,7 @@ public sealed class FunctionsIdempotenciaTests
 
         // A REENTREGA (mesmo evento, sender saudável) consegue enviar.
         var senderSaudavel = new EmailSenderEspiao();
-        await new UserCreatedFunction(NullLogger<UserCreatedFunction>.Instance, senderSaudavel, store)
+        await new UserCreatedFunction(NullLogger<UserCreatedFunction>.Instance, senderSaudavel, store, new HistoricoEspiao())
             .RunAsync(EnvelopeUserCreated("u-1"), CancellationToken.None);
 
         Assert.Single(senderSaudavel.Enviados);
@@ -273,7 +273,7 @@ public sealed class FunctionsIdempotenciaTests
         var sender = new EmailSenderEspiao();
         var store = new StoreEspiao();
 
-        await new UserCreatedFunction(NullLogger<UserCreatedFunction>.Instance, sender, store)
+        await new UserCreatedFunction(NullLogger<UserCreatedFunction>.Instance, sender, store, new HistoricoEspiao())
             .RunAsync(EnvelopeUserCreated("u-1"), CancellationToken.None);
 
         Assert.Equal(0, store.Compensacoes);
@@ -287,7 +287,7 @@ public sealed class FunctionsIdempotenciaTests
         var store = new StoreEspiao();
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            new PaymentProcessedFunction(NullLogger<PaymentProcessedFunction>.Instance, senderQueFalha, store)
+            new PaymentProcessedFunction(NullLogger<PaymentProcessedFunction>.Instance, senderQueFalha, store, new HistoricoEspiao())
                 .RunAsync(EnvelopePagamento("Approved"), CancellationToken.None));
 
         Assert.Equal(1, store.Compensacoes);
@@ -302,7 +302,7 @@ public sealed class FunctionsIdempotenciaTests
             ConnectionFailureType.UnableToConnect, "redis fora"));
 
         await Assert.ThrowsAsync<RedisConnectionException>(() =>
-            new UserCreatedFunction(NullLogger<UserCreatedFunction>.Instance, sender, store)
+            new UserCreatedFunction(NullLogger<UserCreatedFunction>.Instance, sender, store, new HistoricoEspiao())
                 .RunAsync(EnvelopeUserCreated("u-1"), CancellationToken.None));
 
         Assert.Empty(sender.Enviados);
@@ -316,7 +316,7 @@ public sealed class FunctionsIdempotenciaTests
         var sender = new EmailSenderEspiao();
         var store = new StoreEspiao();
         var funcao = new PaymentProcessedFunction(
-            NullLogger<PaymentProcessedFunction>.Instance, sender, store);
+            NullLogger<PaymentProcessedFunction>.Instance, sender, store, new HistoricoEspiao());
 
         await funcao.RunAsync(EnvelopePagamento("Rejected"), CancellationToken.None);
 
@@ -334,7 +334,7 @@ public sealed class FunctionsIdempotenciaTests
     {
         var sender = new EmailSenderEspiao();
         var funcao = new PaymentProcessedFunction(
-            NullLogger<PaymentProcessedFunction>.Instance, sender, new StoreEspiao());
+            NullLogger<PaymentProcessedFunction>.Instance, sender, new StoreEspiao(), new HistoricoEspiao());
 
         await funcao.RunAsync(EnvelopePagamento("Approved"), CancellationToken.None);
         await funcao.RunAsync(EnvelopePagamento("Approved"), CancellationToken.None);

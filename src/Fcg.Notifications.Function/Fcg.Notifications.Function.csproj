@@ -21,11 +21,17 @@
   <ItemGroup>
     <!-- Versões escolhidas pelo template do `func init` (mutuamente compatíveis), não por palpite. -->
     <PackageReference Include="Microsoft.Azure.Functions.Worker" Version="2.52.0" />
+    <PackageReference Include="Microsoft.Azure.Functions.Worker.Extensions.Http" Version="3.3.0" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker.Sdk" Version="2.0.7" />
     <!-- O binding que aciona a função direto pelas filas do RabbitMQ que a plataforma já usa —
          é o que permite migrar para serverless sem tocar no backbone de mensageria. -->
     <PackageReference Include="Microsoft.Azure.Functions.Worker.Extensions.RabbitMQ" Version="2.1.0" />
+    <PackageReference Include="MongoDB.Driver" Version="3.9.0" />
     <PackageReference Include="StackExchange.Redis" Version="2.13.17" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Fcg.Notifications.Function.UnitTests" />
   </ItemGroup>
 
   <ItemGroup>

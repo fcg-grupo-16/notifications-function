@@ -7,11 +7,12 @@ container rodando 24/7 para uma tarefa esporádica.
 
 > **Grupo 16** — org GitHub [`fcg-grupo-16`](https://github.com/fcg-grupo-16)
 
-> **Estado atual:** issues #1 (bootstrap), #2 (envio de e-mail) e #3 (idempotência) prontas — as
-> funções recebem o evento, enviam o e-mail (hoje simulado por log, como no `notifications-api`) e
-> **garantem envio único** mesmo entre reinícios do processo. Faltam
-> [#4 a #6](https://github.com/fcg-grupo-16/notifications-function/issues): histórico em MongoDB,
-> empacotamento/IaC e observabilidade.
+> **Estado atual:** issues #1 (bootstrap), #2 (envio de e-mail), #3 (idempotência) e #4 (histórico
+> em MongoDB) prontas — as funções recebem o evento, enviam o e-mail (hoje simulado por log, como no
+> `notifications-api`), **garantem envio único** mesmo entre reinícios do processo e registram cada
+> envio no histórico de auditoria. Faltam
+> [#5 e #6](https://github.com/fcg-grupo-16/notifications-function/issues): empacotamento/IaC e
+> observabilidade.
 
 ## O que esta função faz
 
@@ -22,7 +23,8 @@ container rodando 24/7 para uma tarefa esporádica.
 
 **Stack (alvo):** Azure Functions v4 · isolated worker · .NET 8 · binding `RabbitMQTrigger` ·
 Redis (idempotência, #3) · MongoDB (`notificationsdb`, histórico, #4) · KEDA (scale-to-zero, #5 e
-`orchestration#29`). **Entregue até aqui:** Functions v4 + isolated worker + `RabbitMQTrigger`.
+`orchestration#29`). **Entregue até aqui:** Functions v4 + isolated worker + `RabbitMQTrigger` +
+Redis + MongoDB.
 
 ## Decisões de arquitetura
 
@@ -156,6 +158,8 @@ em que houver SMTP de verdade.
    contrato do evento (compartilhado com `payments-api` e `catalog-api`) ou consultar o `users-api`.
 2. **A janela de deduplicação é de 7 dias.** Reprocessar a dead-letter depois disso reenvia o
    e-mail — ver a seção "Idempotência".
+3. **A consulta de auditoria só responde quando há réplica no ar** — ou seja, quase nunca, por
+   design. Ver "Histórico de notificações (NoSQL)".
 
 ## Idempotência
 
@@ -228,6 +232,51 @@ Preferimos não processar a processar duas vezes.
 Pelo mesmo motivo, a **falta da connection string é erro de startup**, não um fallback silencioso
 para memória — que reintroduziria exatamente o bug.
 
+## Histórico de notificações (NoSQL)
+
+Cada e-mail enviado vira um documento na collection `notifications` do database `notificationsdb`
+(MongoDB). É o requisito **NoSQL** da Fase 3 do lado da função: um *log de eventos* append-only, de
+alta volumetria.
+
+**Mesmo database, mesma collection e mesmo formato de documento do `notifications-api`** — os
+registros da Fase 2 continuam legíveis:
+
+| Campo | Conteúdo |
+|---|---|
+| `Type` | nome do evento: `UserCreatedEvent` · `PaymentProcessedEvent` |
+| `Recipient`, `Subject`, `Body` | o e-mail como foi enviado |
+| `NaturalKey` | `UserId` no cadastro · `OrderId` na compra |
+| `SentAtUtc` | UTC, com índice descendente `ix_sentAtUtc` |
+
+O teste `NotificationRecord_FormatoCompativelComAFase2` insere um documento cru nesse formato e exige
+que a Function o leia — renomear qualquer campo quebra o teste.
+
+**Best-effort, depois do envio.** A gravação fica num `try/catch` que registra e engole a exceção: se
+ela subisse, o host retentaria a mensagem, a retentativa seria barrada pela idempotência e a
+mensagem terminaria na dead-letter por um erro de auditoria. Pagamento não aprovado não gera e-mail
+e, como na Fase 2, não gera registro.
+
+**Índice criado uma vez por processo, preguiçosamente**, na primeira gravação — e não no startup,
+como no `notifications-api`: com KEDA o processo sobe e desce o tempo todo, e criar no startup
+somaria uma ida ao Mongo a todo cold start.
+
+### Consulta de auditoria
+
+```
+GET /api/v1/notificacoes?limit=50     (x-functions-key: <chave>)
+```
+
+Porta o endpoint homônimo do `notifications-api`. `limit` tem teto de 200 no servidor.
+
+> ⚠️ **Este endpoint fica indisponível a maior parte do tempo, e isso é esperado.** Com a fila vazia
+> o KEDA mantém **0 réplicas**, e não existe "acordar por HTTP": o scaler observa a fila, não o
+> tráfego HTTP. Quem precisa do histórico com a fila vazia consulta o Mongo direto
+> (`mongosh notificationsdb`). **Não** resolva isso subindo `minReplicaCount` para 1 — seria abrir
+> mão do scale-to-zero, o requisito central da fase.
+
+Como a função não tem rota no Kong, a única proteção do endpoint é o `AuthorizationLevel.Function`
+(header `x-functions-key`). Com `func start` local, a chave não é exigida.
+
 ## Configuração
 
 | App setting | Origem no k8s | Exemplo |
@@ -278,6 +327,20 @@ func start
 No startup as duas funções devem aparecer como `rabbitMQTrigger`, e
 `rabbitmqctl list_queues name consumers` deve mostrar **1 consumidor** em cada fila. Se as funções
 aparecem listadas mas os consumidores continuam em 0, procure `failed indexing` no log.
+
+```bash
+# 5) Depois de disparar um cadastro pelo users-api, o histórico tem de estar lá
+docker compose -f ../orchestration/docker-compose.yml exec mongodb mongosh notificationsdb --quiet --eval '
+  printjson(db.notifications.find().sort({SentAtUtc:-1}).limit(1).toArray());
+  printjson(db.notifications.getIndexes());
+'
+#    -> documento com Type/Recipient/Subject/Body/NaturalKey/SentAtUtc + índice ix_sentAtUtc
+```
+
+```bash
+# 6) A consulta de auditoria (local, o func start não exige a chave da função)
+curl -s 'http://localhost:7071/api/v1/notificacoes?limit=5'
+```
 
 ### Testes
 

@@ -2,6 +2,7 @@ using Fcg.Contracts.Events;
 using Fcg.Notifications.Function.Email;
 using Fcg.Notifications.Function.Idempotency;
 using Fcg.Notifications.Function.Messaging;
+using Fcg.Notifications.Function.Persistence;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
 
@@ -18,15 +19,18 @@ public sealed class PaymentProcessedFunction
     private readonly ILogger<PaymentProcessedFunction> _logger;
     private readonly IEmailSender _emailSender;
     private readonly IProcessedMessageStore _store;
+    private readonly INotificationHistoryStore _history;
 
     public PaymentProcessedFunction(
         ILogger<PaymentProcessedFunction> logger,
         IEmailSender emailSender,
-        IProcessedMessageStore store)
+        IProcessedMessageStore store,
+        INotificationHistoryStore history)
     {
         _logger = logger;
         _emailSender = emailSender;
         _store = store;
+        _history = history;
     }
 
     /// <inheritdoc cref="UserCreatedFunction.RunAsync"/>
@@ -103,6 +107,33 @@ public sealed class PaymentProcessedFunction
             throw;
         }
 
-        // TODO(#4): persistir o histórico.
+        await SalvarHistoricoAsync(evento, confirmacao, cancellationToken);
+    }
+
+    /// <summary>
+    /// Grava a confirmação enviada no histórico de auditoria. Best-effort: a exceção é registrada e
+    /// engolida.
+    /// </summary>
+    private async Task SalvarHistoricoAsync(
+        PaymentProcessedEvent evento, EmailMessage confirmacao, CancellationToken ct)
+    {
+        try
+        {
+            await _history.SaveAsync(new NotificationRecord
+            {
+                Type = nameof(PaymentProcessedEvent),
+                Recipient = confirmacao.To,
+                Subject = confirmacao.Subject,
+                Body = confirmacao.Body,
+                NaturalKey = evento.OrderId.ToString(),
+                SentAtUtc = DateTime.UtcNow
+            }, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Falha ao persistir o histórico da confirmação de compra para OrderId={OrderId}; e-mail já enviado.",
+                evento.OrderId);
+        }
     }
 }

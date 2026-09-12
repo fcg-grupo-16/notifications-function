@@ -2,6 +2,7 @@ using Fcg.Contracts.Events;
 using Fcg.Notifications.Function.Email;
 using Fcg.Notifications.Function.Idempotency;
 using Fcg.Notifications.Function.Messaging;
+using Fcg.Notifications.Function.Persistence;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
 
@@ -20,15 +21,18 @@ public sealed class UserCreatedFunction
     private readonly ILogger<UserCreatedFunction> _logger;
     private readonly IEmailSender _emailSender;
     private readonly IProcessedMessageStore _store;
+    private readonly INotificationHistoryStore _history;
 
     public UserCreatedFunction(
         ILogger<UserCreatedFunction> logger,
         IEmailSender emailSender,
-        IProcessedMessageStore store)
+        IProcessedMessageStore store,
+        INotificationHistoryStore history)
     {
         _logger = logger;
         _emailSender = emailSender;
         _store = store;
+        _history = history;
     }
 
     /// <summary>
@@ -113,9 +117,11 @@ public sealed class UserCreatedFunction
         // chave, sairia calada, o host daria ack, e o e-mail desapareceria sem log de erro e sem ir
         // para a dead-letter. É também o que mantém verdadeiro o contrato de IEmailSender ("falha
         // transitória deve lançar, a reentrega resolve").
+        EmailMessage email;
+
         try
         {
-            var email = EmailTemplates.Welcome(evento);
+            email = EmailTemplates.Welcome(evento);
             await _emailSender.SendAsync(email, cancellationToken);
         }
         catch
@@ -124,6 +130,33 @@ public sealed class UserCreatedFunction
             throw;
         }
 
-        // TODO(#4): persistir o histórico em notificationsdb (best-effort, depois do envio).
+        await SalvarHistoricoAsync(evento, email, cancellationToken);
+    }
+
+    /// <summary>
+    /// Grava o envio no histórico de auditoria. Best-effort: a exceção é registrada e engolida,
+    /// para uma falha de auditoria não reentregar a mensagem.
+    /// </summary>
+    private async Task SalvarHistoricoAsync(
+        UserCreatedEvent evento, EmailMessage email, CancellationToken ct)
+    {
+        try
+        {
+            await _history.SaveAsync(new NotificationRecord
+            {
+                Type = nameof(UserCreatedEvent),
+                Recipient = email.To,
+                Subject = email.Subject,
+                Body = email.Body,
+                NaturalKey = evento.UserId,
+                SentAtUtc = DateTime.UtcNow
+            }, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Falha ao persistir o histórico da notificação Welcome para UserId={UserId}; e-mail já enviado.",
+                evento.UserId);
+        }
     }
 }

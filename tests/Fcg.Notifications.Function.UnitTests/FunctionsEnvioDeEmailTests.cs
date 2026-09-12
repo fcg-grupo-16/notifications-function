@@ -2,6 +2,7 @@ using Fcg.Notifications.Function.Email;
 using Fcg.Notifications.Function.Functions;
 using Fcg.Notifications.Function.Idempotency;
 using Fcg.Notifications.Function.Messaging;
+using Fcg.Notifications.Function.Persistence;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -76,6 +77,35 @@ internal sealed class StoreEspiao : IProcessedMessageStore
 }
 
 /// <summary>
+/// Histórico em memória, só para teste. Guarda o que foi persistido e permite simular falha.
+/// </summary>
+internal sealed class HistoricoEspiao : INotificationHistoryStore
+{
+    private readonly Exception? _erroParaLancar;
+
+    public HistoricoEspiao(Exception? erroParaLancar = null) => _erroParaLancar = erroParaLancar;
+
+    public List<NotificationRecord> Salvos { get; } = [];
+
+    public Task SaveAsync(NotificationRecord record, CancellationToken ct = default)
+    {
+        if (_erroParaLancar is not null)
+        {
+            throw _erroParaLancar;
+        }
+
+        Salvos.Add(record);
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<NotificationRecord>> GetRecentAsync(int limit, CancellationToken ct = default) =>
+        Task.FromResult<IReadOnlyList<NotificationRecord>>(
+            Salvos.OrderByDescending(r => r.SentAtUtc).Take(limit).ToList());
+
+    public Task GarantirIndicesAsync(CancellationToken ct = default) => Task.CompletedTask;
+}
+
+/// <summary>
 /// Testes das Functions em si — o comportamento observável de ponta a ponta dentro do processo:
 /// dado um corpo de mensagem, sai (ou não sai) e-mail.
 /// </summary>
@@ -97,12 +127,14 @@ public sealed class FunctionsEnvioDeEmailTests
         + "\"gameId\":\"game-42\",\"price\":" + price + ",\"status\":\"" + status + "\"}}";
 
     private static UserCreatedFunction NovaUserCreated(
-        EmailSenderEspiao sender, StoreEspiao? store = null) =>
-        new(NullLogger<UserCreatedFunction>.Instance, sender, store ?? new StoreEspiao());
+        EmailSenderEspiao sender, StoreEspiao? store = null, HistoricoEspiao? historico = null) =>
+        new(NullLogger<UserCreatedFunction>.Instance, sender, store ?? new StoreEspiao(),
+            historico ?? new HistoricoEspiao());
 
     private static PaymentProcessedFunction NovaPaymentProcessed(
-        EmailSenderEspiao sender, StoreEspiao? store = null) =>
-        new(NullLogger<PaymentProcessedFunction>.Instance, sender, store ?? new StoreEspiao());
+        EmailSenderEspiao sender, StoreEspiao? store = null, HistoricoEspiao? historico = null) =>
+        new(NullLogger<PaymentProcessedFunction>.Instance, sender, store ?? new StoreEspiao(),
+            historico ?? new HistoricoEspiao());
 
     // ---------------------------------------------------------------- cadastro
 
@@ -373,7 +405,7 @@ public sealed class DestinatarioTests
             "\"message\":{\"userId\":\"u-1\",\"nome\":\"Maria\"," +
             "\"email\":\"vitima@fcg.com\\r\\nBcc: atacante@evil.com\"}}";
 
-        await new UserCreatedFunction(NullLogger<UserCreatedFunction>.Instance, sender, new StoreEspiao())
+        await new UserCreatedFunction(NullLogger<UserCreatedFunction>.Instance, sender, new StoreEspiao(), new HistoricoEspiao())
             .RunAsync(corpo, CancellationToken.None);
 
         Assert.Empty(sender.Enviados);
