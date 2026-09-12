@@ -1,0 +1,20 @@
+# Configuração não sensível. As connection strings vêm do SealedSecret notifications-function-secret.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: notifications-function-config
+  namespace: fcg
+  labels:
+    app: notifications-function
+data:
+  FUNCTIONS_WORKER_RUNTIME: "dotnet-isolated"
+  AzureFunctionsJobHost__Logging__Console__IsEnabled: "true"
+  # Vazio funciona: verificado no smoke test da imagem, o host sobe e indexa as três funções sem
+  # Storage Account (nenhum trigger depende de Storage).
+  AzureWebJobsStorage: ""
+
+  MongoDbSettings__DatabaseName: "notificationsdb"
+
+  OTEL_SERVICE_NAME: "notifications-function"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4317"
+  OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"

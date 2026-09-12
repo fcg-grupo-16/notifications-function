@@ -51,3 +51,86 @@ jobs:
             exit 1
           fi
           echo "nenhuma vulnerabilidade high/critical"
+
+  imagem:
+    name: Imagem Docker e smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build da imagem
+        run: docker build -t notifications-function:ci .
+
+      - name: Sobe RabbitMQ e Redis
+        run: |
+          docker network create smoke
+          docker run -d --name rabbitmq --network smoke rabbitmq:3.13.7-management
+          docker run -d --name redis --network smoke redis:7.4.1-alpine
+          # Espera pelo log, não por `docker exec rabbitmq-diagnostics`: o exec roda como root e, no
+          # prelaunch, cria o .erlang.cookie com dono errado e derruba o broker (eacces).
+          for _ in $(seq 1 45); do
+            docker logs rabbitmq 2>&1 | grep -q "Server startup complete" && break
+            sleep 2
+          done
+          for q in notifications-user-created notifications-payment-processed; do
+            docker exec rabbitmq rabbitmqadmin declare queue name=$q durable=true
+          done
+
+      - name: Smoke test — o host indexa as três funções
+        run: |
+          docker run -d --name fn --network smoke \
+            -e AzureWebJobsStorage="" \
+            -e RabbitMqConnection="amqp://guest:guest@rabbitmq:5672/" \
+            -e Redis__ConnectionString="redis:6379" \
+            notifications-function:ci
+          for _ in $(seq 1 45); do
+            docker logs fn 2>&1 | grep -q "Job host started" && break
+            sleep 2
+          done
+          docker logs fn > fn.log 2>&1
+          # Checagem negativa obrigatória: sem broker, o nome da função aparece na mensagem de erro e
+          # um grep só pelo nome passaria mesmo com a função desabilitada.
+          if grep -q "failed indexing" fn.log; then
+            cat fn.log
+            echo "::error::função desabilitada na indexação"
+            exit 1
+          fi
+          for f in UserCreatedFunction PaymentProcessedFunction NotificationHistoryFunction; do
+            grep -q "Host.Functions.$f" fn.log || { cat fn.log; echo "::error::$f não foi indexada"; exit 1; }
+          done
+
+      - name: Smoke test — confirmação de compra com preço em pt-BR (ICU)
+        run: |
+          docker exec rabbitmq rabbitmqadmin publish exchange=amq.default \
+            routing_key=notifications-payment-processed \
+            properties='{"content_type":"application/vnd.masstransit+json"}' \
+            payload='{"messageId":"ci-1","conversationId":"ci","messageType":["urn:message:Fcg.Contracts.Events:PaymentProcessedEvent"],"message":{"orderId":"3f2504e0-4f89-11d3-9a0c-0305e82c3301","userId":"u-ci","gameId":"game-42","price":"1234.56","status":"Approved"}}'
+          for _ in $(seq 1 30); do
+            docker logs fn 2>&1 | grep -q 'R\$ 1.234,56' && exit 0
+            sleep 2
+          done
+          docker logs fn
+          echo "::error::o e-mail de confirmação não saiu com o preço em pt-BR"
+          exit 1
+
+  iac:
+    name: Manifestos Kubernetes e Terraform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validar manifestos (kubeconform)
+        run: |
+          docker run --rm -v "$PWD/deploy/k8s:/k8s:ro" ghcr.io/yannh/kubeconform:v0.6.7 \
+            -strict -summary -ignore-missing-schemas /k8s
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
+      - name: Validar Terraform
+        working-directory: deploy/terraform
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate

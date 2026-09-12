@@ -1,0 +1,7 @@
+# O state do Terraform guarda os app_settings em claro, incluindo senhas — nunca versionar.
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+*.tfvars
+!*.tfvars.example

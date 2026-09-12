@@ -7,12 +7,12 @@ container rodando 24/7 para uma tarefa esporádica.
 
 > **Grupo 16** — org GitHub [`fcg-grupo-16`](https://github.com/fcg-grupo-16)
 
-> **Estado atual:** issues #1 (bootstrap), #2 (envio de e-mail), #3 (idempotência) e #4 (histórico
-> em MongoDB) prontas — as funções recebem o evento, enviam o e-mail (hoje simulado por log, como no
-> `notifications-api`), **garantem envio único** mesmo entre reinícios do processo e registram cada
-> envio no histórico de auditoria. Faltam
-> [#5 e #6](https://github.com/fcg-grupo-16/notifications-function/issues): empacotamento/IaC e
-> observabilidade.
+> **Estado atual:** issues #1 a #5 prontas — as funções recebem o evento, enviam o e-mail (hoje
+> simulado por log, como no `notifications-api`), **garantem envio único** mesmo entre reinícios do
+> processo, registram cada envio no histórico de auditoria e são empacotadas em imagem Docker com
+> manifestos Kubernetes e IaC. Falta a
+> [#6](https://github.com/fcg-grupo-16/notifications-function/issues/6) (observabilidade) e o deploy
+> com KEDA no `orchestration#29`.
 
 ## O que esta função faz
 
@@ -119,7 +119,7 @@ nas Functions.
 `PurchaseConfirmation` devolve `null` quando o pagamento não foi aprovado, e a Function apenas
 respeita esse `null` — a decisão de "manda ou não manda" mora num lugar só.
 
-### ⚠️ Requisito de globalização (ICU) — a #5 precisa respeitar isto no Dockerfile
+### ⚠️ Requisito de globalização (ICU)
 
 `EmailTemplates` formata o preço com `CultureInfo("pt-BR")` (`R$ 1.234,56`), e o
 `Directory.Build.props` declara `InvariantGlobalization=false` para todos os projetos.
@@ -133,8 +133,9 @@ A imagem oficial de Azure Functions traz ICU. Se alguém trocar a base, instale 
 
 > **Nenhum teste unitário pega isso.** O teste `PurchaseConfirmation_FormataPrecoEmPtBr` valida o
 > **formato** (separador de milhar, decimal, símbolo) — verificado que ele continua verde mesmo
-> apagando a propriedade do csproj, porque o host de teste sempre roda com ICU disponível. A única
-> verificação real é um **smoke test da imagem**, escopo da issue #5.
+> apagando a propriedade do csproj, porque o host de teste sempre roda com ICU disponível. A
+> verificação real é o **smoke test da imagem** no CI, que publica uma compra aprovada e exige
+> `R$ 1.234,56` no log do container.
 
 ### Sanitização de log
 
@@ -276,6 +277,56 @@ Porta o endpoint homônimo do `notifications-api`. `limit` tem teto de 200 no se
 
 Como a função não tem rota no Kong, a única proteção do endpoint é o `AuthorizationLevel.Function`
 (header `x-functions-key`). Com `func start` local, a chave não é exigida.
+
+## Empacotamento e deploy
+
+| Artefato | Onde | Papel |
+|---|---|---|
+| `Dockerfile` | raiz | imagem sobre a base oficial `azure-functions/dotnet-isolated:4-dotnet-isolated8.0` |
+| `deploy/k8s/` | este repo | `Deployment` + `ConfigMap` — **como** a função roda |
+| `ScaledObject` (KEDA) | `orchestration` | **como a plataforma escala** a função a partir da fila — `orchestration#29` |
+| `deploy/terraform/` | este repo | Function App na Azure, IaC de referência (não é o caminho da demo — ver o README do diretório) |
+
+**Por que o `Deployment` mora aqui e o `ScaledObject` no `orchestration`:** o `Deployment` descreve
+o serviço (imagem, env, recursos); a escala é decisão de orquestração, junto do resto da
+plataforma. Por isso o `Deployment` **não declara `replicas`** — quem manda na contagem é o KEDA, e
+um `replicas` aqui faria cada `kubectl apply` desfazer o scale-to-zero.
+
+Também **sem probes HTTP** (a função é acionada por fila e o host não expõe endpoint de saúde) e
+**sem initContainer** de espera (o KEDA só sobe o pod quando já existe mensagem, ou seja, com o
+broker no ar).
+
+```bash
+docker build -t notifications-function:local .
+minikube image load notifications-function:local
+kubectl apply -f deploy/k8s/
+```
+
+### ⚠️ O trigger RabbitMQ conecta no broker durante a indexação
+
+Se o broker não estiver acessível quando o host sobe, as duas funções RabbitMQ **falham na
+indexação e ficam desabilitadas** — o host continua de pé, lista só a `NotificationHistoryFunction`
+e **não consome nada**:
+
+```
+Error indexing method 'Functions.UserCreatedFunction' ... Connection refused.
+Function 'Functions.UserCreatedFunction' failed indexing and will be disabled.
+```
+
+É por isso que o smoke test do CI sobe um RabbitMQ de verdade e procura explicitamente por
+`failed indexing`: sem broker, o nome da função aparece **na mensagem de erro**, e um `grep` só
+pelo nome passaria com a função desabilitada.
+
+### Smoke test da imagem (CI)
+
+O job `Imagem Docker e smoke test` constrói a imagem, sobe RabbitMQ e Redis e verifica que:
+
+1. as três funções são indexadas (`Host.Functions.*`) e nenhuma cai em `failed indexing`;
+2. uma compra aprovada publicada na fila gera o e-mail com `R$ 1.234,56` — prova que a ICU está na
+   imagem.
+
+O job `Manifestos Kubernetes e Terraform` roda `kubeconform` em `deploy/k8s/` e `terraform fmt` +
+`validate` em `deploy/terraform/`.
 
 ## Configuração
 
