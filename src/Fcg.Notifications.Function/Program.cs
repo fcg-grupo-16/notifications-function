@@ -1,10 +1,14 @@
 using Fcg.Notifications.Function.Email;
 using Fcg.Notifications.Function.Idempotency;
+using Fcg.Notifications.Function.Observability;
 using Fcg.Notifications.Function.Persistence;
 using Microsoft.Azure.Functions.Worker.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using MongoDB.Driver;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 using StackExchange.Redis;
 
 var builder = FunctionsApplication.CreateBuilder(args);
@@ -64,6 +68,24 @@ builder.Services.AddSingleton<IMongoClient>(_ =>
     new MongoClient(MongoClientSettingsFactory.Criar(mongoConnectionString)));
 builder.Services.AddSingleton(sp => sp.GetRequiredService<IMongoClient>().GetDatabase(mongoDatabaseName));
 builder.Services.AddSingleton<INotificationHistoryStore, MongoNotificationHistoryStore>();
-// TODO(#6): OpenTelemetry (traces OTLP) e log estruturado em JSON.
+builder.Logging.AddJsonConsole(options =>
+{
+    options.IncludeScopes = true;
+    options.UseUtcTimestamp = true;
+    options.TimestampFormat = "yyyy-MM-ddTHH:mm:ss.fffZ";
+});
+
+// Traces OTLP (Jaeger). Endpoint ausente => desligado, para `func start` local funcionar sem Jaeger.
+var otlpEndpoint = builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"];
+
+if (!string.IsNullOrWhiteSpace(otlpEndpoint))
+{
+    builder.Services.AddOpenTelemetry()
+        .ConfigureResource(resource => resource.AddService(
+            builder.Configuration["OTEL_SERVICE_NAME"] ?? "notifications-function"))
+        .WithTracing(tracing => tracing
+            .AddSource(TraceContextRestorer.SourceName)
+            .AddOtlpExporter());
+}
 
 builder.Build().Run();

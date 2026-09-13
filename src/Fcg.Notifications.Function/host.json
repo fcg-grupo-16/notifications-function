@@ -5,7 +5,10 @@
       "default": "Information",
       "Fcg.Notifications.Function": "Information",
       "Host.Results": "Information",
-      "Host.Aggregator": "Warning"
+      "Host.Aggregator": "Warning",
+      "Function.UserCreatedFunction.User": "None",
+      "Function.PaymentProcessedFunction.User": "None",
+      "Function.NotificationHistoryFunction.User": "None"
     }
   },
   "extensions": {

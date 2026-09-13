@@ -7,12 +7,11 @@ container rodando 24/7 para uma tarefa esporádica.
 
 > **Grupo 16** — org GitHub [`fcg-grupo-16`](https://github.com/fcg-grupo-16)
 
-> **Estado atual:** issues #1 a #5 prontas — as funções recebem o evento, enviam o e-mail (hoje
+> **Estado atual:** issues #1 a #6 prontas — as funções recebem o evento, enviam o e-mail (hoje
 > simulado por log, como no `notifications-api`), **garantem envio único** mesmo entre reinícios do
-> processo, registram cada envio no histórico de auditoria e são empacotadas em imagem Docker com
-> manifestos Kubernetes e IaC. Falta a
-> [#6](https://github.com/fcg-grupo-16/notifications-function/issues/6) (observabilidade) e o deploy
-> com KEDA no `orchestration#29`.
+> processo, registram cada envio no histórico de auditoria, são empacotadas em imagem Docker com
+> manifestos Kubernetes e IaC, e emitem logs estruturados e traces correlacionados com o fluxo de
+> origem. Falta o deploy com KEDA no `orchestration#29`.
 
 ## O que esta função faz
 
@@ -332,6 +331,95 @@ O job `Imagem Docker e smoke test` constrói a imagem, sobe RabbitMQ e Redis e v
 O job `Manifestos Kubernetes e Terraform` roda `kubeconform` em `deploy/k8s/` e `terraform fmt` +
 `validate` em `deploy/terraform/`.
 
+## Observabilidade
+
+A função é observada por **logs estruturados** e **traces distribuídos**. Métricas no `/metrics`
+ficam de fora de propósito — ver "Métricas" abaixo.
+
+### Logs em JSON, com correlação em toda linha
+
+Cada linha que a função loga sai como **JSON no stdout** (lido por `kubectl logs`), com um escopo
+contendo `ConversationId`, `MessageId`, `MessageType` e `TraceId`:
+
+```json
+{"Timestamp":"2026-09-12T22:14:20.792Z","LogLevel":"Information",
+ "Category":"Fcg.Notifications.Function.Email.LoggingEmailSender",
+ "Message":"[E-mail] Para: sd***@fcg.com | Assunto: Bem-vindo(a) à FIAP Cloud Games | ...",
+ "Scopes":[ ..., {"ConversationId":"01000000-e113-d9ff-...","MessageId":"01000000-e113-d9ff-...",
+                  "MessageType":"urn:message:Fcg.Contracts.Events:UserCreatedEvent",
+                  "TraceId":"43a640e83ab6c89bacfe9549f4dbbc86"}]}
+```
+
+```bash
+kubectl -n fcg logs -l app=notifications-function | grep '^ *{' | sed 's/^ *//' | jq '.Message, (.Scopes[] | select(.TraceId) | .TraceId)'
+```
+
+**O caminho que funcionou** — e o que não funcionou, medido no container:
+
+| Tentativa | Resultado |
+|---|---|
+| Formatter JSON do **host** (`AzureFunctionsJobHost__Logging__Console__FormatterName=json`) | ❌ o host imprime JSON, mas o log chega do worker **só como texto**: `State` vazio e o escopo como `Dictionary`2[...]` |
+| `AddJsonConsole(IncludeScopes = true)` **no worker** (`Program.cs`) | ✅ campos do template e do escopo como JSON de verdade |
+
+O host repassa o stdout do worker sob `Host.Function.Console` e, sem ajuste, ainda imprime uma cópia
+em texto de cada log. O `host.json` silencia essa cópia (`Function.<Nome>.User: None`) e mantém os
+logs próprios do host (`Executing`/`Executed`, falhas de indexação).
+
+O `users-api` loga o `TraceId`, mas **não** o `ConversationId`: a correlação de logs entre os dois
+serviços é pelo `TraceId`.
+
+### Traces: o span da função entra no trace de quem publicou
+
+O `TraceContextRestorer` lê o contexto W3C do envelope e abre um span `Consumer` filho dele. Medido
+num envelope real publicado pelo `users-api` (MassTransit 8.5, com outbox):
+
+```json
+"headers": { "MT-Activity-Id": "00-f16db9c722cc9550b16acbf47e1250df-607ee5dc698b5e19-01" }
+```
+
+> ⚠️ O header é **`MT-Activity-Id`**, e não `Diagnostic-Id` como previa a issue #6. `traceparent`
+> fica aceito como alternativa.
+
+No Jaeger, o cadastro vira **um único trace**:
+
+```
+users-api              server    POST api/v1/usuarios
+users-api              producer  outbox send
+users-api              client    outbox process
+users-api              producer  Fcg.Contracts.Events:UserCreatedEvent send
+notifications-function consumer  UserCreatedFunction
+```
+
+> ⚠️ **Trace da compra depende do `payments-api#19`.** O header só existe quando o serviço que
+> publica tem OpenTelemetry. O `payments-api` (que publica `PaymentProcessedEvent`) ainda não tem, então
+> hoje o span da `PaymentProcessedFunction` nasce como trace próprio. Sem header, a função segue
+> normalmente — a correlação é best-effort.
+
+O exportador OTLP só é ligado com `OTEL_EXPORTER_OTLP_ENDPOINT` definido. **Jaeger fora do ar não
+bloqueia o envio** — medido: execução `Succeeded` em 14 ms com o Jaeger parado.
+
+### Encerramento do pod e perda de spans
+
+O exportador envia em lote a cada 5 s, e o KEDA termina o pod quando a fila esvazia. Medido com
+`docker stop` logo após o processamento: **o span não se perdeu** — mas não por um encerramento
+gracioso. O PID 1 da imagem oficial de Functions (`/opt/startup/start_nonappservice.sh`) **não
+repassa o `SIGTERM`**: o container só morre no `SIGKILL`, após o período de graça (exit `137`, 30 s).
+O lote é exportado nesse intervalo.
+
+Consequência para o `orchestration#29`: cada scale-down leva o `terminationGracePeriodSeconds`
+inteiro. **Não** aumente o `cooldownPeriod` do KEDA por causa de traces.
+
+### Métricas: por que não há `/metrics`
+
+O Prometheus coleta em *pull*, a cada 15 s. Uma função que escala a zero não tem o que ser raspado com
+0 réplicas e, quando existe, vive segundos — o modelo pull é **estruturalmente incompatível** com
+scale-to-zero. Por isso o `Deployment` declara `prometheus.io/scrape: "false"` e a observabilidade da
+função fica em logs + traces (opção A da issue #6).
+
+O comportamento de escala aparece em `kubectl -n fcg get pods -w` (0 → 1 → 0). Painéis de réplicas e
+profundidade de fila no Grafana exigiriam `kube-state-metrics` e o plugin `rabbitmq_prometheus`, que a
+plataforma ainda não tem.
+
 ## Configuração
 
 | App setting | Origem no k8s | Exemplo |
@@ -340,7 +428,8 @@ O job `Manifestos Kubernetes e Terraform` roda `kubeconform` em `deploy/k8s/` e 
 | `Redis__ConnectionString` | SealedSecret | `redis:6379` |
 | `MongoDbSettings__ConnectionString` | SealedSecret | `mongodb://mongodb:27017/?replicaSet=rs0` |
 | `MongoDbSettings__DatabaseName` | ConfigMap | `notificationsdb` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | ConfigMap | `http://jaeger:4317` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | ConfigMap | `http://jaeger:4317` (ausente = traces desligados) |
+| `OTEL_SERVICE_NAME` | ConfigMap | `notifications-function` |
 
 `RabbitMqConnection` é o **nome da app setting** referenciada pelo atributo
 `[RabbitMQTrigger(..., ConnectionStringSetting = "RabbitMqConnection")]` — desde a v2 da extensão não
