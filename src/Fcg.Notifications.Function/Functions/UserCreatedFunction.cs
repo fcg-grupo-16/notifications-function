@@ -2,6 +2,7 @@ using Fcg.Contracts.Events;
 using Fcg.Notifications.Function.Email;
 using Fcg.Notifications.Function.Idempotency;
 using Fcg.Notifications.Function.Messaging;
+using Fcg.Notifications.Function.Observability;
 using Fcg.Notifications.Function.Persistence;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
@@ -77,6 +78,11 @@ public sealed class UserCreatedFunction
         }
 
         var evento = envelope.Message!;
+
+        // Span antes do escopo, para o TraceId do escopo já ser o do trace restaurado.
+        using var atividade = TraceContextRestorer.StartChildActivity(envelope, nameof(UserCreatedFunction));
+        using var escopo = _logger.BeginEventScope(envelope);
+        atividade?.SetTag("fcg.user.id", evento.UserId);
 
         // O contrato declara UserId e Email como `string` não-anulável, mas o System.Text.Json
         // SOBRESCREVE o default com null quando o JSON traz `"email": null` — então a garantia do

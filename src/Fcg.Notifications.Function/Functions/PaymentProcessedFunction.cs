@@ -2,6 +2,7 @@ using Fcg.Contracts.Events;
 using Fcg.Notifications.Function.Email;
 using Fcg.Notifications.Function.Idempotency;
 using Fcg.Notifications.Function.Messaging;
+using Fcg.Notifications.Function.Observability;
 using Fcg.Notifications.Function.Persistence;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
@@ -51,6 +52,11 @@ public sealed class PaymentProcessedFunction
         }
 
         var evento = envelope.Message!;
+
+        // Span antes do escopo, para o TraceId do escopo já ser o do trace restaurado.
+        using var atividade = TraceContextRestorer.StartChildActivity(envelope, nameof(PaymentProcessedFunction));
+        using var escopo = _logger.BeginEventScope(envelope);
+        atividade?.SetTag("fcg.order.id", evento.OrderId.ToString());
 
         // Ver UserCreatedFunction: o contrato declara não-anulável, mas o JSON pode trazer null.
         if (evento.OrderId == Guid.Empty || !LogSanitizer.IdentificadorEhAceitavel(evento.UserId))
