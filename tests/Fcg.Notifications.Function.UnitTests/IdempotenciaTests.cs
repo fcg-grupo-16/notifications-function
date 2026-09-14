@@ -287,7 +287,7 @@ public sealed class FunctionsIdempotenciaTests
         var store = new StoreEspiao();
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            new PaymentProcessedFunction(NullLogger<PaymentProcessedFunction>.Instance, senderQueFalha, store, new HistoricoEspiao())
+            new PaymentProcessedFunction(NullLogger<PaymentProcessedFunction>.Instance, senderQueFalha, store, new HistoricoEspiao(), new ResolvedorEspiao())
                 .RunAsync(EnvelopePagamento("Approved"), CancellationToken.None));
 
         Assert.Equal(1, store.Compensacoes);
@@ -316,7 +316,7 @@ public sealed class FunctionsIdempotenciaTests
         var sender = new EmailSenderEspiao();
         var store = new StoreEspiao();
         var funcao = new PaymentProcessedFunction(
-            NullLogger<PaymentProcessedFunction>.Instance, sender, store, new HistoricoEspiao());
+            NullLogger<PaymentProcessedFunction>.Instance, sender, store, new HistoricoEspiao(), new ResolvedorEspiao());
 
         await funcao.RunAsync(EnvelopePagamento("Rejected"), CancellationToken.None);
 
@@ -334,7 +334,7 @@ public sealed class FunctionsIdempotenciaTests
     {
         var sender = new EmailSenderEspiao();
         var funcao = new PaymentProcessedFunction(
-            NullLogger<PaymentProcessedFunction>.Instance, sender, new StoreEspiao(), new HistoricoEspiao());
+            NullLogger<PaymentProcessedFunction>.Instance, sender, new StoreEspiao(), new HistoricoEspiao(), new ResolvedorEspiao());
 
         await funcao.RunAsync(EnvelopePagamento("Approved"), CancellationToken.None);
         await funcao.RunAsync(EnvelopePagamento("Approved"), CancellationToken.None);

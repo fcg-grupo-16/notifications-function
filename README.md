@@ -115,8 +115,13 @@ ao `notifications-api`. Trocar por SMTP/HTTP real é registrar outra implementa�
 nas Functions.
 
 `EmailTemplates` renderiza as mensagens em pt-BR e **guarda a regra de negócio**:
-`PurchaseConfirmation` devolve `null` quando o pagamento não foi aprovado, e a Function apenas
-respeita esse `null` — a decisão de "manda ou não manda" mora num lugar só.
+`PurchaseConfirmation` devolve `null` quando o pagamento não foi aprovado — a decisão de "manda ou
+não manda" mora num lugar só.
+
+> A `PaymentProcessedFunction` também testa `IsApproved` antes de chamar o template, e isso **não**
+> duplica a regra: é guarda de custo. Desde a #9 o template precisa do e-mail resolvido no
+> `users-api`, e resolver o contato de um pagamento recusado seria pagar uma ida à rede para
+> descartar o resultado. O template segue sendo a autoridade sobre o `null`.
 
 ### ⚠️ Requisito de globalização (ICU)
 
@@ -153,9 +158,21 @@ em que houver SMTP de verdade.
 
 ### Limitações conhecidas
 
-1. **A confirmação de compra é endereçada ao `UserId`, não a um e-mail.** Comportamento herdado do
-   `notifications-api`: `PaymentProcessedEvent` não carrega o endereço. Corrigir exige enriquecer o
-   contrato do evento (compartilhado com `payments-api` e `catalog-api`) ou consultar o `users-api`.
+1. **A confirmação de compra é endereçada a um e-mail real, resolvido no `users-api`.** Até a
+   [#9](https://github.com/fcg-grupo-16/notifications-function/issues/9) ela ia para o `UserId` — o
+   `PaymentProcessedEvent` não carrega endereço. Era inofensivo enquanto o envio é simulado por log;
+   com um SMTP real, não chegaria a ninguém. Agora a Function consulta
+   `GET /api/v1/usuarios/{id}/contato` com um token de **serviço**, assinado com chave **distinta**
+   da dos usuários (ADR 0007, no `orchestration`), e cacheia o resultado no Redis.
+
+   A política de falha distingue **dois** casos, e a distinção veio de uma medição no cluster:
+
+   - **`users-api` fora, lento ou com erro** → a exceção **sobe**. O host reentrega e, no limite,
+     manda para a dead-letter. Entre adiar e perder em silêncio, adiamos.
+   - **Usuário inexistente (404)** → registra `Warning` e **segue** (ack). É falha determinística:
+     reentregar bate no mesmo 404 até a dead-letter, e quem não existe nunca vai ter e-mail.
+     Observado ao apagar um usuário entre a compra e o processamento — a Function gastou as cinco
+     tentativas sem chance de sucesso.
 2. **A janela de deduplicação é de 7 dias.** Reprocessar a dead-letter depois disso reenvia o
    e-mail — ver a seção "Idempotência".
 3. **A consulta de auditoria só responde quando há réplica no ar** — ou seja, quase nunca, por
@@ -448,6 +465,9 @@ plataforma ainda não tem.
 | `Redis__ConnectionString` | SealedSecret | `redis:6379` |
 | `MongoDbSettings__ConnectionString` | SealedSecret | `mongodb://mongodb:27017/?replicaSet=rs0` |
 | `MongoDbSettings__DatabaseName` | ConfigMap | `notificationsdb` |
+| `UsersApi__BaseUrl` | ConfigMap | `http://users-api` |
+| `ServiceAuth__SecretKey` | SealedSecret | (obrigatoriamente **distinta** da `JwtSettings__SecretKey`) |
+| `ServiceAuth__Issuer` / `ServiceAuth__Audience` | ConfigMap | `FiapCloudGames.Servicos` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | ConfigMap | `http://jaeger:4317` (ausente = traces desligados) |
 | `OTEL_SERVICE_NAME` | ConfigMap | `notifications-function` |
 

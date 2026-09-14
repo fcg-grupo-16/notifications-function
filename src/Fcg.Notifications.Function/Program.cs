@@ -1,3 +1,4 @@
+using Fcg.Notifications.Function.Contatos;
 using Fcg.Notifications.Function.Email;
 using Fcg.Notifications.Function.Idempotency;
 using Fcg.Notifications.Function.Observability;
@@ -68,6 +69,45 @@ builder.Services.AddSingleton<IMongoClient>(_ =>
     new MongoClient(MongoClientSettingsFactory.Criar(mongoConnectionString)));
 builder.Services.AddSingleton(sp => sp.GetRequiredService<IMongoClient>().GetDatabase(mongoDatabaseName));
 builder.Services.AddSingleton<INotificationHistoryStore, MongoNotificationHistoryStore>();
+
+// RESOLUÇÃO DE CONTATO (issue #9). O PaymentProcessedEvent só carrega o UserId, e a confirmação de
+// compra era endereçada a um ObjectId. A Function consulta o endpoint interno do users-api com um
+// token de SERVIÇO — assinado com ServiceAuth:SecretKey, que é DIFERENTE da chave dos usuários.
+// Ver ADR 0007 no repositório orchestration.
+//
+// A SecretKey é OBRIGATÓRIA quando a resolução está ligada: sem ela o serviço subiria e só falharia
+// na primeira confirmação de compra — erro de configuração deve aparecer no startup. Issuer e
+// Audience caem no padrão da plataforma, que é o mesmo fixado no ADR 0007.
+var usersApiBaseUrl = builder.Configuration["UsersApi:BaseUrl"];
+
+if (!string.IsNullOrWhiteSpace(usersApiBaseUrl))
+{
+    var serviceSecret = builder.Configuration["ServiceAuth:SecretKey"]
+        ?? throw new InvalidOperationException(
+            "ServiceAuth:SecretKey não configurada, mas UsersApi:BaseUrl está — a consulta de contato "
+            + "precisa das duas.");
+
+    builder.Services.AddSingleton(new OpcoesDeContato(
+        serviceSecret,
+        builder.Configuration["ServiceAuth:Issuer"] ?? "FiapCloudGames.Servicos",
+        builder.Configuration["ServiceAuth:Audience"] ?? "FiapCloudGames.Servicos"));
+
+    builder.Services.AddHttpClient<IResolvedorDeContato, ResolvedorDeContatoHttp>(cliente =>
+    {
+        cliente.BaseAddress = new Uri(usersApiBaseUrl.TrimEnd('/') + "/");
+
+        // TIMEOUT CURTO: esta chamada está no caminho de uma mensagem, e a Function escala a zero.
+        // Esperar os 100 s do default do HttpClient por um users-api fora seguraria o pod e o lote
+        // inteiro de mensagens.
+        cliente.Timeout = TimeSpan.FromSeconds(5);
+    });
+}
+else
+{
+    // Sem configuração, a Function AINDA indexa — só a confirmação de compra falha, e com mensagem
+    // explícita. Ver ResolvedorDeContatoIndisponivel.
+    builder.Services.AddSingleton<IResolvedorDeContato, ResolvedorDeContatoIndisponivel>();
+}
 builder.Logging.AddJsonConsole(options =>
 {
     options.IncludeScopes = true;
