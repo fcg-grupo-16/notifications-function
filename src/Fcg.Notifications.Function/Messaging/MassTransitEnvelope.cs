@@ -60,10 +60,25 @@ public sealed record MassTransitEnvelope<T> where T : class
     /// Headers da mensagem.
     /// </summary>
     /// <remarks>
-    /// O MassTransit coloca aqui o contexto de trace W3C (<c>Diagnostic-Id</c>) — mas SÓ quando há
-    /// uma <see cref="System.Diagnostics.Activity"/> ativa no publisher. Hoje o envelope real chega
-    /// com <c>headers</c> VAZIO, porque os serviços ainda não têm instrumentação OpenTelemetry
-    /// (users-api#19). Não presuma que o header existe; ver a issue #6.
+    /// <para>
+    /// O MassTransit coloca aqui o contexto de trace W3C — mas SÓ quando há uma
+    /// <see cref="System.Diagnostics.Activity"/> ativa no publisher. Com os publishers já
+    /// instrumentados, o envelope real capturado do broker traz:
+    /// </para>
+    /// <code>
+    /// "headers": { "MT-Activity-Id": "00-ff866e2a4eb32ae4b59cdc2e9eabf008-058fdd07d688ca65-01" }
+    /// </code>
+    /// <para>
+    /// <b>A chave é <c>MT-Activity-Id</c>, e NÃO <c>Diagnostic-Id</c>.</b> Este comentário afirmava
+    /// <c>Diagnostic-Id</c> e "<c>headers</c> VAZIO" — as duas coisas medidas antes de users-api#19,
+    /// e ambas desmentidas pela captura acima. O README deste repositório já registrava a chave
+    /// correta; o comentário é que ficou para trás. Quem lê o contexto é
+    /// <see cref="Fcg.Notifications.Function.Observability.TraceContextRestorer"/>.
+    /// </para>
+    /// <para>
+    /// Continua valendo NÃO presumir que o header existe: um publisher sem instrumentação publica
+    /// sem ele, e o consumo tem de seguir funcionando — a correlação é best-effort.
+    /// </para>
     /// </remarks>
     [JsonPropertyName("headers")]
     public Dictionary<string, JsonElement>? Headers { get; init; }

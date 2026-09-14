@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using Fcg.Contracts.Events;
 using Fcg.Notifications.Function.Messaging;
+using Fcg.Notifications.Function.Observability;
 
 namespace Fcg.Notifications.Function.UnitTests;
 
@@ -16,6 +18,12 @@ public sealed class MassTransitEnvelopeParserTests
     /// real pela API. É a especificação viva da integração: se este teste quebrar após um upgrade do
     /// MassTransit, o formato do envelope mudou e a Function vai parar de processar em produção.
     /// </summary>
+    /// <remarks>
+    /// <b>Captura de 2026-09-09, ANTERIOR à instrumentação dos publishers</b> — por isso
+    /// <c>"headers": {}</c>. Ela é mantida de propósito: publisher sem OpenTelemetry é um caso que
+    /// continua existindo, e o parser precisa tolerá-lo. O envelope de HOJE, com o contexto de
+    /// trace presente, está em <see cref="EnvelopePagamentoComTrace"/>.
+    /// </remarks>
     private const string EnvelopeReal = """
     {
       "messageId": "01000000-b43e-86fd-bb6f-08df0e1c3f3e",
@@ -65,17 +73,93 @@ public sealed class MassTransitEnvelopeParserTests
         Assert.Equal("01000000-b43e-86fd-bb6f-08df0e1c3f3e", envelope.MessageId);
     }
 
-    [Fact(DisplayName = "Envelope real: headers vem VAZIO (sem Diagnostic-Id) enquanto não houver OpenTelemetry")]
-    public void TryParse_EnvelopeReal_HeadersVazio()
+    [Fact(DisplayName = "Envelope de publisher SEM instrumentação: headers vazio é parseado sem erro")]
+    public void TryParse_EnvelopeSemInstrumentacao_HeadersVazio()
     {
-        // Documenta o estado atual medido no broker. O MassTransit só propaga contexto de trace
-        // quando existe uma Activity ativa no publisher, o que passa a acontecer depois de
-        // users-api#19. A issue #6 (correlação de traces) NÃO pode presumir que o header existe.
+        // Este teste afirmava ser "o estado atual medido no broker" e que a correlação de traces NÃO
+        // podia presumir o header. Isso deixou de ser verdade: os publishers foram instrumentados e
+        // o envelope real passou a trazer MT-Activity-Id (ver EnvelopePagamentoComTrace). A fixture,
+        // porém, continua válida como captura HISTÓRICA — e o caso que ela cobre segue real, porque
+        // um publisher sem OpenTelemetry publica sem header e o consumo não pode quebrar por isso.
         var envelope = MassTransitEnvelopeParser.TryParse<UserCreatedEvent>(EnvelopeReal, TipoUserCreated);
 
         Assert.NotNull(envelope);
         Assert.NotNull(envelope!.Headers);
         Assert.Empty(envelope.Headers!);
+    }
+
+    /// <summary>
+    /// Envelope de <c>PaymentProcessedEvent</c> CAPTURADO do broker em 2026-09-14, depois de uma
+    /// compra real pelo gateway, com o <c>payments-api</c> já instrumentado (payments-api#19).
+    /// </summary>
+    /// <remarks>
+    /// Cobre o fluxo da COMPRA, que os testes de observabilidade não alcançavam: lá o envelope com
+    /// contexto é o do <c>UserCreatedEvent</c>. Aqui a evidência é de que o publisher do meio da
+    /// cadeia (<c>payments-api</c>) também propaga o contexto.
+    /// </remarks>
+    private const string EnvelopePagamentoComTrace = """
+    {
+      "messageId": "01000000-e231-d707-7ab4-08df1287409f",
+      "conversationId": "01000000-464e-59ab-2b8d-08df12874020",
+      "sourceAddress": "rabbitmq://rabbitmq/payments-order-placed",
+      "destinationAddress": "rabbitmq://rabbitmq/Fcg.Contracts.Events:PaymentProcessedEvent",
+      "messageType": [
+        "urn:message:Fcg.Contracts.Events:PaymentProcessedEvent"
+      ],
+      "message": {
+        "orderId": "abbac0b5-ba04-459b-9f2b-527c5284ba33",
+        "userId": "6aa83184ea579c02244c2ee8",
+        "gameId": "6a52a0ebff41f7eaff91f750",
+        "price": "49.90",
+        "status": "Approved"
+      },
+      "sentTime": "2026-09-14T17:40:22.3978164Z",
+      "headers": {
+        "MT-Activity-Id": "00-ff866e2a4eb32ae4b59cdc2e9eabf008-058fdd07d688ca65-01"
+      },
+      "host": {
+        "machineName": "payments-api-74887d748-gsj8j",
+        "processName": "Fcg.Payments.Api",
+        "massTransitVersion": "8.5.10.0"
+      }
+    }
+    """;
+
+    [Fact(DisplayName = "Envelope real de pagamento (pós-instrumentação): traz MT-Activity-Id do payments-api")]
+    public void TryParse_EnvelopePagamentoComTrace_TrazContextoDeTrace()
+    {
+        var envelope = MassTransitEnvelopeParser.TryParse<PaymentProcessedEvent>(
+            EnvelopePagamentoComTrace, TipoPaymentProcessed);
+
+        Assert.NotNull(envelope);
+        Assert.Equal("Approved", envelope!.Message!.Status);
+        Assert.NotNull(envelope.Headers);
+        Assert.Equal(
+            "00-ff866e2a4eb32ae4b59cdc2e9eabf008-058fdd07d688ca65-01",
+            envelope.Headers!["MT-Activity-Id"].GetString());
+    }
+
+    [Fact(DisplayName = "O contexto do envelope de pagamento vira o pai do span da Function")]
+    public void StartChildActivity_DoEnvelopeDePagamento_EntraNoTraceDaCompra()
+    {
+        // Amarra a fixture ao componente que a consome: se o MassTransit trocar o nome do header num
+        // upgrade, é este teste que cai — e não o trace da compra se partindo silenciosamente.
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = fonte => fonte.Name == TraceContextRestorer.SourceName,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData
+        };
+        ActivitySource.AddActivityListener(listener);
+
+        var envelope = MassTransitEnvelopeParser.TryParse<PaymentProcessedEvent>(
+            EnvelopePagamentoComTrace, TipoPaymentProcessed);
+
+        using var atividade = TraceContextRestorer.StartChildActivity(envelope!, "teste");
+
+        Assert.NotNull(atividade);
+        Assert.Equal("ff866e2a4eb32ae4b59cdc2e9eabf008", atividade!.TraceId.ToString());
+        Assert.Equal("058fdd07d688ca65", atividade.ParentSpanId.ToString());
+        Assert.Equal(ActivityKind.Consumer, atividade.Kind);
     }
 
     [Fact(DisplayName = "Corpo em camelCase preenche as propriedades (o bug mais provável do componente)")]
@@ -180,12 +264,20 @@ public sealed class MassTransitEnvelopeParserTests
     /// Envelope de PaymentProcessedEvent CAPTURADO do broker depois de uma compra real.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// <b>Repare no <c>"price": "29.90"</c> — com ASPAS.</b> O MassTransit serializa `decimal` como
     /// string no JSON. O System.Text.Json rejeita isso por padrão e lança <c>JsonException</c>, o que
     /// fazia a mensagem cair no caminho de poison message e a confirmação de compra nunca ser
     /// enviada — em silêncio, porque a função registrava execução bem-sucedida. O teste anterior
     /// passava porque usava `49.90` sem aspas, ou seja, testava uma suposição em vez da realidade.
     /// Só apareceu rodando o fluxo real. NÃO troque esta string por um número.
+    /// </para>
+    /// <para>
+    /// <b>Captura de 2026-09-09, ANTERIOR à instrumentação do <c>payments-api</c></b> — daí
+    /// <c>"headers": {}</c>. Continua válida: o que ela cobre não depende de trace nenhum. O
+    /// envelope de pagamento de hoje, já com contexto propagado, é
+    /// <see cref="EnvelopePagamentoComTrace"/>.
+    /// </para>
     /// </remarks>
     private const string EnvelopePagamentoReal = """
     {
