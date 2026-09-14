@@ -15,6 +15,19 @@ data:
 
   MongoDbSettings__DatabaseName: "notificationsdb"
 
+  # Consulta de contato no users-api (issue #9). A confirmação de compra precisa de um e-mail real,
+  # e o PaymentProcessedEvent só carrega o UserId. O ServiceAuth__SecretKey vem CIFRADO no
+  # notifications-function-secret e é obrigatoriamente DISTINTO do JwtSettings__SecretKey.
+  #
+  # A URL é o Service ClusterIP: esta chamada NÃO passa pelo gateway.
+  #
+  # ⚠️ Manter em sincronia com orchestration/k8s/24-notifications-function.yaml, que é o manifesto
+  # que o deploy-minikube.sh de fato aplica. Esta cópia existe para quem implanta a partir DESTE
+  # repositório; divergir faz a feature nascer inerte num dos dois caminhos.
+  UsersApi__BaseUrl: "http://users-api"
+  ServiceAuth__Issuer: "FiapCloudGames.Servicos"
+  ServiceAuth__Audience: "FiapCloudGames.Servicos"
+
   OTEL_SERVICE_NAME: "notifications-function"
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4317"
   OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"

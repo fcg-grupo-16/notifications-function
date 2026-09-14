@@ -1,4 +1,5 @@
 using Fcg.Contracts.Events;
+using Fcg.Notifications.Function.Contatos;
 using Fcg.Notifications.Function.Email;
 using Fcg.Notifications.Function.Idempotency;
 using Fcg.Notifications.Function.Messaging;
@@ -21,17 +22,20 @@ public sealed class PaymentProcessedFunction
     private readonly IEmailSender _emailSender;
     private readonly IProcessedMessageStore _store;
     private readonly INotificationHistoryStore _history;
+    private readonly IResolvedorDeContato _contatos;
 
     public PaymentProcessedFunction(
         ILogger<PaymentProcessedFunction> logger,
         IEmailSender emailSender,
         IProcessedMessageStore store,
-        INotificationHistoryStore history)
+        INotificationHistoryStore history,
+        IResolvedorDeContato contatos)
     {
         _logger = logger;
         _emailSender = emailSender;
         _store = store;
         _history = history;
+        _contatos = contatos;
     }
 
     /// <inheritdoc cref="UserCreatedFunction.RunAsync"/>
@@ -67,19 +71,46 @@ public sealed class PaymentProcessedFunction
             return;
         }
 
-        // A REGRA DE NEGÓCIO MORA NO TEMPLATE, não aqui: PurchaseConfirmation devolve null quando
-        // o pagamento não foi aprovado. Duplicar a verificação com um `if (Status != "Approved")`
-        // nesta função criaria dois lugares para a mesma regra, que um dia divergiriam.
-        // Comportamento portado 1:1 do PaymentProcessedConsumer.
-        var confirmacao = EmailTemplates.PurchaseConfirmation(evento);
-
-        if (confirmacao is null)
+        // A REGRA DE NEGÓCIO CONTINUA NO TEMPLATE: PurchaseConfirmation devolve null quando o
+        // pagamento não foi aprovado, e é ele a autoridade.
+        //
+        // O teste aqui NÃO duplica a regra — é GUARDA DE CUSTO. Desde a #9 o template precisa do
+        // e-mail REAL do comprador, que sai de uma consulta ao users-api; resolver o contato de um
+        // pagamento RECUSADO seria pagar uma ida à rede para descartar o resultado.
+        if (!EmailTemplates.IsApproved(evento.Status))
         {
             _logger.LogInformation(
                 "Pagamento {Status} para o pedido {OrderId} (usuário {UserId}): nenhum e-mail de confirmação será enviado.",
                 evento.Status, evento.OrderId, evento.UserId);
             return;
         }
+
+        // RESOLVE ANTES DE MARCAR A IDEMPOTÊNCIA — e antes, também, do log de "aprovado". Se a
+        // consulta falhar, nada foi consumido e a reentrega pode ter sucesso quando o users-api
+        // voltar.
+        //
+        // A exceção SOBE de propósito: o host reentrega e, no limite, manda para a dead-letter. A
+        // alternativa — dar ACK e seguir sem enviar — perderia a confirmação de compra em silêncio,
+        // sem registro recuperável. Entre ADIAR e PERDER, adiamos (issue #9).
+        string email;
+
+        try
+        {
+            email = await _contatos.ResolverEmailAsync(evento.UserId, cancellationToken);
+        }
+        catch (ContatoNaoEncontradoException ex)
+        {
+            // TERMINAL: o usuário não existe. Reentregar bateria no mesmo 404 até a dead-letter, sem
+            // chance de sucesso. Registra e segue (ack). Warning, não Error: é um dado que sumiu, não
+            // um defeito do serviço — e 5xx/Error por fluxo esperado contamina a taxa de erro.
+            _logger.LogWarning(ex,
+                "Confirmação de compra não enviada: contato do usuário {UserId} não existe mais. OrderId={OrderId}",
+                evento.UserId, evento.OrderId);
+            atividade?.SetTag("fcg.notification.ignorada", "contato-inexistente");
+            return;
+        }
+
+        var confirmacao = EmailTemplates.PurchaseConfirmation(evento, email)!;
 
         _logger.LogInformation(
             "PaymentProcessedEvent aprovado. OrderId={OrderId} UserId={UserId} GameId={GameId} ConversationId={ConversationId}",

@@ -28,7 +28,7 @@ public sealed class HistoricoNasFunctionsTests
 
     private static PaymentProcessedFunction NovaPaymentProcessed(
         EmailSenderEspiao sender, HistoricoEspiao historico) =>
-        new(NullLogger<PaymentProcessedFunction>.Instance, sender, new StoreEspiao(), historico);
+        new(NullLogger<PaymentProcessedFunction>.Instance, sender, new StoreEspiao(), historico, new ResolvedorEspiao());
 
     [Fact(DisplayName = "Boas-vindas grava o histórico no formato da Fase 2")]
     public async Task UserCreated_GravaHistoricoNoFormatoDaFase2()

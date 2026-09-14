@@ -1,3 +1,4 @@
+using Fcg.Notifications.Function.Contatos;
 using Fcg.Notifications.Function.Email;
 using Fcg.Notifications.Function.Functions;
 using Fcg.Notifications.Function.Idempotency;
@@ -131,10 +132,90 @@ public sealed class FunctionsEnvioDeEmailTests
         new(NullLogger<UserCreatedFunction>.Instance, sender, store ?? new StoreEspiao(),
             historico ?? new HistoricoEspiao());
 
+    [Fact(DisplayName = "Usuário inexistente (404) NÃO reentrega: registra e segue")]
+    public async Task PaymentProcessed_ContatoNaoEncontrado_NaoReentrega()
+    {
+        // Distinção medida no cluster: um usuário apagado entre a compra e o processamento fez a
+        // Function bater cinco vezes no mesmo 404, rumo à dead-letter. Falha determinística não se
+        // reentrega — ao contrário da transitória, coberta pelo teste vizinho.
+        var store = new StoreEspiao();
+        var sender = new EmailSenderEspiao();
+        var resolvedor = new ResolvedorEspiao(
+            falha: new ContatoNaoEncontradoException("usuário sumiu"));
+
+        var funcao = new PaymentProcessedFunction(
+            NullLogger<PaymentProcessedFunction>.Instance, sender, store, new HistoricoEspiao(), resolvedor);
+
+        // NÃO lança: o host dá ack e a mensagem não volta.
+        await funcao.RunAsync(EnvelopePagamento("Approved"), CancellationToken.None);
+
+        Assert.Empty(sender.Enviados);
+        Assert.Empty(store.Marcadas);
+    }
+
+    [Fact(DisplayName = "Contato indisponível PROPAGA e não consome a idempotência")]
+    public async Task PaymentProcessed_ContatoIndisponivel_NaoConsomeIdempotencia()
+    {
+        // A escolha aqui é deliberada e está documentada na Function: entre ADIAR e PERDER em
+        // silêncio, adiamos. A exceção sobe, o host reentrega e no limite manda para a dead-letter.
+        // Se a chave de idempotência fosse consumida antes, a reentrega sairia calada e a
+        // confirmação de compra se perderia para sempre.
+        var store = new StoreEspiao();
+        var sender = new EmailSenderEspiao();
+        var resolvedor = new ResolvedorEspiao(
+            falha: new ContatoIndisponivelException("users-api fora"));
+
+        var funcao = new PaymentProcessedFunction(
+            NullLogger<PaymentProcessedFunction>.Instance, sender, store, new HistoricoEspiao(), resolvedor);
+
+        await Assert.ThrowsAsync<ContatoIndisponivelException>(() =>
+            funcao.RunAsync(EnvelopePagamento("Approved"), CancellationToken.None));
+
+        Assert.Empty(store.Marcadas);
+        Assert.Empty(sender.Enviados);
+    }
+
+    [Fact(DisplayName = "Pagamento recusado NÃO consulta o users-api")]
+    public async Task PaymentProcessed_Recusado_NaoConsultaOResolvedor()
+    {
+        // Guarda de custo: resolver o contato de um pagamento que não vai gerar e-mail seria pagar
+        // uma ida à rede para descartar o resultado.
+        var resolvedor = new ResolvedorEspiao();
+        var funcao = new PaymentProcessedFunction(
+            NullLogger<PaymentProcessedFunction>.Instance, new EmailSenderEspiao(), new StoreEspiao(),
+            new HistoricoEspiao(), resolvedor);
+
+        await funcao.RunAsync(EnvelopePagamento("Rejected"), CancellationToken.None);
+
+        Assert.Empty(resolvedor.Consultados);
+    }
+
+    [Fact(DisplayName = "A confirmação vai para o e-mail RESOLVIDO, não para o UserId")]
+    public async Task PaymentProcessed_Aprovado_UsaOEmailResolvido()
+    {
+        var sender = new EmailSenderEspiao();
+        var resolvedor = new ResolvedorEspiao(email: "resolvido@fcg.com");
+        var funcao = new PaymentProcessedFunction(
+            NullLogger<PaymentProcessedFunction>.Instance, sender, new StoreEspiao(),
+            new HistoricoEspiao(), resolvedor);
+
+        await funcao.RunAsync(EnvelopePagamento("Approved"), CancellationToken.None);
+
+        var email = Assert.Single(sender.Enviados);
+        Assert.Equal("resolvido@fcg.com", email.To);
+
+        // O DEFEITO da #9 em uma linha: antes, isto era o UserId. Um ObjectId não é endereço.
+        Assert.NotEqual("u-1", email.To);
+        Assert.Contains("@", email.To);
+
+        // E consultou exatamente o usuário do evento — não um id qualquer.
+        Assert.Equal("u-1", Assert.Single(resolvedor.Consultados));
+    }
+
     private static PaymentProcessedFunction NovaPaymentProcessed(
         EmailSenderEspiao sender, StoreEspiao? store = null, HistoricoEspiao? historico = null) =>
         new(NullLogger<PaymentProcessedFunction>.Instance, sender, store ?? new StoreEspiao(),
-            historico ?? new HistoricoEspiao());
+            historico ?? new HistoricoEspiao(), new ResolvedorEspiao());
 
     // ---------------------------------------------------------------- cadastro
 

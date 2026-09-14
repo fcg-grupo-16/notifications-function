@@ -46,10 +46,14 @@ public sealed class EmailTemplatesTests
             Status = status
         };
 
-        var email = EmailTemplates.PurchaseConfirmation(evento);
+        var email = EmailTemplates.PurchaseConfirmation(evento, "comprador@fcg.com");
 
         Assert.NotNull(email);
-        Assert.Equal("u-1", email!.To);
+        // ANTES DA #9 esta asserção era `Assert.Equal("u-1", email.To)` — ela CODIFICAVA o defeito:
+        // a confirmação saía endereçada ao UserId porque o PaymentProcessedEvent não carrega
+        // endereço. Agora o e-mail real vem resolvido do users-api e entra por parâmetro.
+        Assert.Equal("comprador@fcg.com", email!.To);
+        Assert.NotEqual(evento.UserId, email.To);
         Assert.Contains("game-42", email.Body);
         Assert.Contains(orderId.ToString(), email.Body);
     }
@@ -77,7 +81,7 @@ public sealed class EmailTemplatesTests
             Status = "Approved"
         };
 
-        var email = EmailTemplates.PurchaseConfirmation(evento);
+        var email = EmailTemplates.PurchaseConfirmation(evento, "comprador@fcg.com");
 
         Assert.NotNull(email);
         // Separador de milhar ponto e decimal vírgula: a marca da cultura pt-BR.
@@ -102,7 +106,7 @@ public sealed class EmailTemplatesTests
             Status = status
         };
 
-        Assert.Null(EmailTemplates.PurchaseConfirmation(evento));
+        Assert.Null(EmailTemplates.PurchaseConfirmation(evento, "comprador@fcg.com"));
     }
 
     [Theory(DisplayName = "IsApproved reconhece o status aprovado sem depender de caixa")]
