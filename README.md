@@ -390,10 +390,30 @@ users-api              producer  Fcg.Contracts.Events:UserCreatedEvent send
 notifications-function consumer  UserCreatedFunction
 ```
 
-> ⚠️ **Trace da compra depende do `payments-api#19`.** O header só existe quando o serviço que
-> publica tem OpenTelemetry. O `payments-api` (que publica `PaymentProcessedEvent`) ainda não tem, então
-> hoje o span da `PaymentProcessedFunction` nasce como trace próprio. Sem header, a função segue
-> normalmente — a correlação é best-effort.
+A compra também fecha, desde que o `payments-api` foi instrumentado
+([payments-api#19](https://github.com/fcg-grupo-16/payments-api/issues/19)). Medido no cluster —
+trace `ff866e2a4eb32ae4b59cdc2e9eabf008`, **10 spans em três serviços**:
+
+```
+catalog-api            server    POST api/v1/biblioteca
+catalog-api            producer  outbox send
+catalog-api            client    outbox process
+catalog-api            producer  Fcg.Contracts.Events:OrderPlacedEvent send
+payments-api           consumer  payments-order-placed receive
+payments-api           internal  payments-order-placed process
+payments-api           producer  Fcg.Contracts.Events:PaymentProcessedEvent send
+catalog-api            consumer  catalog-payment-processed receive
+catalog-api            internal  catalog-payment-processed process
+notifications-function consumer  PaymentProcessedFunction
+```
+
+O span da função e o `catalog-payment-processed receive` têm o **mesmo pai** (`058fdd07`, o
+`PaymentProcessedEvent send`): os dois consumidores do evento aparecem lado a lado no trace.
+
+> ⚠️ Esta ressalva dizia o contrário — que o `payments-api` "ainda não tem" OpenTelemetry e que por
+> isso o span da `PaymentProcessedFunction` nascia como trace próprio. Era verdade quando foi
+> escrita e deixou de ser. Sem header a função segue normalmente: a correlação é best-effort, e é
+> isso que o teste de envelope sem instrumentação cobre.
 
 O exportador OTLP só é ligado com `OTEL_EXPORTER_OTLP_ENDPOINT` definido. **Jaeger fora do ar não
 bloqueia o envio** — medido: execução `Succeeded` em 14 ms com o Jaeger parado.
