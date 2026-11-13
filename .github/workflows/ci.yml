@@ -172,3 +172,53 @@ jobs:
           terraform fmt -check -recursive
           terraform init -backend=false -input=false
           terraform validate
+
+  # --- Fase 4: publicação no ECR e deploy no EKS (#17) ------------------------------------------
+  # Só na `main`, e só com a variável da organização AWS_DEPLOY_HABILITADO=true. Fora da sessão do AWS
+  # Academy ela fica `false` (scripts/atualizar-credenciais-ci.sh, no orchestration), e o CI segue
+  # construindo e testando sem falhar por credencial expirada.
+  #
+  # Credenciais: as de SESSÃO do lab, em secrets da organização. O laboratório não permite OIDC
+  # (orchestration, ADR 0010); elas expiram em ~4 h e não são de longa duração.
+  publicar:
+    name: Publicar a imagem no ECR
+    needs: [build, imagem]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_HABILITADO == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Credenciais da sessão do AWS Academy
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Login no ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Tag = SHA do commit, e o repositório do ECR é IMMUTABLE: a tag aponta para uma única imagem
+      # para sempre, e o deploy é rastreável até o commit.
+      - name: Build e push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/fcg/${{ github.event.repository.name }}:${{ github.sha }}
+          cache-from: type=gha
+
+  # Rolling update pelo workflow COMPARTILHADO do orchestration, em vez de uma cópia por serviço.
+  deploy:
+    needs: publicar
+    uses: fcg-grupo-16/orchestration/.github/workflows/deploy-servico.yml@main
+    with:
+      servico: ${{ github.event.repository.name }}
+      tag: ${{ github.sha }}
+    secrets: inherit
+
