@@ -55,11 +55,17 @@ jobs:
   imagem:
     name: Imagem Docker e smoke test
     runs-on: ubuntu-latest
+    env:
+      # A tag é o SHA DO COMMIT (#17), não `:ci` nem o nome da branch. Tag fixa é a causa raiz do
+      # "deploy que não muda nada" (orchestration#40), e `github.ref_name` vira `17/merge` em PR, que
+      # o Docker lê como registry `notifications-function` na porta 17. É esta mesma imagem, já
+      # testada pelo smoke abaixo, que o push para o ECR vai publicar quando a conta AWS voltar.
+      IMAGEM: notifications-function:${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Build da imagem
-        run: docker build -t notifications-function:ci .
+        run: docker build -t "$IMAGEM" .
 
       - name: Sobe RabbitMQ e Redis
         run: |
@@ -108,7 +114,7 @@ jobs:
             -e Redis__ConnectionString="redis:6379" \
             -e UsersApi__BaseUrl="http://users-api-stub" \
             -e ServiceAuth__SecretKey="CI_Service_HmacSha256_Key_With_At_Least_32_Chars!" \
-            notifications-function:ci
+            "$IMAGEM"
           for _ in $(seq 1 45); do
             docker logs fn 2>&1 | grep -q "Job host started" && break
             sleep 2
