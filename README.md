@@ -305,7 +305,7 @@ Como a função não tem rota no Kong, a única proteção do endpoint é o `Aut
 | `Dockerfile` | raiz | imagem sobre a base oficial `azure-functions/dotnet-isolated:4-dotnet-isolated8.0` |
 | `deploy/k8s/` | este repo | `Deployment` + `ConfigMap` — **como** a função roda |
 | `ScaledObject` (KEDA) | `orchestration` | **como a plataforma escala** a função a partir da fila — `orchestration#29` |
-| `deploy/terraform/` | este repo | Function App na Azure, IaC de referência (não é o caminho da demo — ver o README do diretório) |
+| `deploy/terraform/` | este repo | Function App na Azure — **alternativa avaliada e não implantada**. A Function roda no Kubernetes com KEDA, e na Fase 4 no EKS ([ADR 0008](https://github.com/fcg-grupo-16/orchestration/blob/main/docs/adr/0008-provedor-de-nuvem-aws.md)). O CI só valida o arquivo — ver o README do diretório |
 
 **Por que o `Deployment` mora aqui e o `ScaledObject` no `orchestration`:** o `Deployment` descreve
 o serviço (imagem, env, recursos); a escala é decisão de orquestração, junto do resto da

@@ -1,4 +1,10 @@
-# IaC — Azure Function App (caminho de nuvem)
+# IaC — Azure Function App (alternativa avaliada, **não implantada**)
+
+> ⚠️ **Este não é o caminho de execução da Function, nem na Fase 3 nem na Fase 4.** A Function roda
+> como container no Kubernetes com KEDA ([ADR 0003](https://github.com/fcg-grupo-16/orchestration/blob/main/docs/adr/0003-serverless-azure-functions-keda.md)), e na Fase 4 a plataforma vai para
+> **AWS/EKS** ([ADR 0008](https://github.com/fcg-grupo-16/orchestration/blob/main/docs/adr/0008-provedor-de-nuvem-aws.md)). Nada da plataforma implanta em Azure. Este diretório fica como
+> registro de que a alternativa foi estudada, e o CI o valida só para não apodrecer
+> ([#18](https://github.com/fcg-grupo-16/notifications-function/issues/18)).
 
 Este Terraform provisiona a `notifications-function` num **Azure Function App** real.
 
@@ -11,10 +17,11 @@ Este Terraform provisiona a `notifications-function` num **Azure Function App** 
    com broker gerenciado), e o broker da plataforma roda no minikube.
 
 Por isso a demonstração roda no **Kubernetes com KEDA** (`deploy/k8s/` + o `ScaledObject` no repo
-`orchestration`), onde o scale-to-zero é real e o custo é zero. Este Terraform fica como IaC de
-referência para quando a plataforma for para a nuvem.
+`orchestration`), onde o scale-to-zero é real e o custo é zero. Quando a plataforma foi para a
+nuvem, na Fase 4, foi para o **EKS**, e a Function foi junto como container: este Terraform não é
+usado lá.
 
-## Como aplicar
+## Como aplicar (só para avaliar a alternativa; não faz parte do deploy)
 
 ```bash
 cd deploy/terraform
