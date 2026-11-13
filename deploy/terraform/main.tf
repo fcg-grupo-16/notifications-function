@@ -1,4 +1,17 @@
-# Azure Function App para a notifications-function (IaC de referência — ver README.md).
+# ⚠️ ALTERNATIVA AVALIADA E NÃO IMPLANTADA — NÃO é o caminho de execução desta Function.
+#
+# Este Terraform provisiona um Azure Function App. A plataforma NÃO o usa: pela ADR 0003, o host de
+# Functions roda como container no Kubernetes com KEDA, porque os planos Consumption e Flex
+# Consumption da Azure não suportam o trigger de RabbitMQ, e os que suportam são de instância
+# reservada — sem escala a zero, que é o requisito.
+#
+# Pela ADR 0008 (Fase 4), a plataforma vai para AWS/EKS, e a Function vai junto, como container. Este
+# arquivo fica como registro de que a alternativa foi estudada, e é validado pelo CI apenas para não
+# apodrecer.
+#
+#   ADR 0003: https://github.com/fcg-grupo-16/orchestration/blob/main/docs/adr/0003-serverless-azure-functions-keda.md
+#   ADR 0008: https://github.com/fcg-grupo-16/orchestration/blob/main/docs/adr/0008-provedor-de-nuvem-aws.md
+#
 # SKU EP1 (Elastic Premium), não Y1 (Consumption): o binding RabbitMQTrigger não é suportado nos
 # planos Consumption e Flex Consumption.
 
